@@ -1,0 +1,308 @@
+/* Shadow DOM 內部樣式：與頁面 CSS 完全隔離。 */
+:host {
+  all: initial;
+}
+
+* {
+  box-sizing: border-box;
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+}
+
+.collab-toolbar {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  background: rgba(30, 30, 32, 0.92);
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+  z-index: 10;
+}
+
+.collab-toolbar button {
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #e8e8ea;
+  background: transparent;
+  cursor: pointer;
+}
+
+.collab-toolbar button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.collab-toolbar button:focus,
+.collab-toolbar button.collab-focused,
+.collab-toolbar button:focus-visible {
+  outline: 2px solid #8db6ff;
+  outline-offset: 2px;
+}
+
+.collab-toolbar button.active {
+  background: #3478f6;
+  color: #fff;
+}
+
+.collab-toolbar button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.collab-toolbar .collab-drag-handle {
+  position: relative;
+  width: 20px;
+  padding: 5px 4px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.collab-drag-handle::before {
+  content: "";
+  display: block;
+  width: 10px;
+  height: 16px;
+  margin: auto;
+  background-image: radial-gradient(circle, currentColor 1px, transparent 1.5px);
+  background-size: 5px 5px;
+}
+
+.collab-toolbar .collab-drag-handle.dragging {
+  cursor: grabbing;
+}
+
+.collab-toolbar .collab-tool {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 5px;
+}
+
+.collab-tool svg {
+  width: 18px;
+  height: 18px;
+  overflow: visible;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.collab-tool::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: rgba(20, 20, 22, 0.96);
+  color: #f4f4f6;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.collab-tool:hover::after,
+.collab-tool:focus::after,
+.collab-tool.collab-focused::after,
+.collab-tool:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
+.collab-highlight {
+  position: fixed;
+  border: 2px solid #3478f6;
+  background: rgba(52, 120, 246, 0.12);
+  border-radius: 2px;
+  pointer-events: none;
+  display: none;
+  z-index: 5;
+}
+
+.collab-highlight.collab-draft-highlight {
+  border-color: #9b6cff;
+  background: rgba(155, 108, 255, 0.14);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.72);
+}
+
+.collab-selection-indicator {
+  position: fixed;
+  display: none;
+  border: 2px dashed #3478f6;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.collab-label-input {
+  position: fixed;
+  display: none;
+  width: 180px;
+  height: 28px;
+  padding: 4px 7px;
+  border: 1px solid #8db6ff;
+  border-radius: 5px;
+  background: rgba(30, 30, 32, 0.98);
+  color: #f0f0f2;
+  font-size: 12px;
+  outline: none;
+  pointer-events: auto;
+  z-index: 21;
+}
+
+.collab-editor {
+  position: fixed;
+  min-width: 260px;
+  max-width: 340px;
+  padding: 10px;
+  background: rgba(30, 30, 32, 0.96);
+  border-radius: 10px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+  display: none;
+  z-index: 20;
+}
+
+.collab-editor .collab-editor-drag-handle {
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 16px;
+  margin: -4px 0 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: radial-gradient(circle, #9a9aa0 1px, transparent 1.5px);
+  background-size: 5px 5px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.collab-editor .collab-editor-drag-handle.dragging {
+  cursor: grabbing;
+}
+
+.collab-editor .collab-editor-drag-handle:focus-visible {
+  outline: 2px solid #8db6ff;
+  outline-offset: 2px;
+}
+
+.collab-editor textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  color: #f0f0f2;
+  font-size: 12px;
+  padding: 6px;
+  outline: none;
+}
+
+.collab-editor .collab-editor-target {
+  color: #9a9aa0;
+  font-size: 11px;
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collab-editor .collab-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.collab-editor .collab-editor-hint {
+  color: #ff8f8f;
+  font-size: 11px;
+  margin-top: 6px;
+  display: none;
+}
+
+.collab-editor button {
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.collab-editor .collab-submit {
+  background: #3478f6;
+  color: #fff;
+}
+
+.collab-editor .collab-cancel {
+  background: rgba(255, 255, 255, 0.12);
+  color: #e8e8ea;
+}
+
+.collab-marker {
+  position: fixed;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #e6a23c;
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: auto;
+  cursor: default;
+  z-index: 8;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+.collab-marker-acknowledged {
+  background: #3478f6;
+}
+
+.collab-marker-working {
+  background: #8e5cc7;
+}
+
+.collab-marker-failed {
+  background: #d33c30;
+}
+
+.collab-toast {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(30, 30, 32, 0.95);
+  color: #e8e8ea;
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 30;
+}
+
+.collab-toast.visible {
+  opacity: 1;
+}

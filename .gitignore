@@ -1,0 +1,17 @@
+.spectra/
+.spectra.yaml
+.agents/skills/*/
+!.agents/skills/preview-collaboration-*/
+.claude/skills/*/
+!.claude/skills/preview-collaboration-*/
+.claude/hooks/
+.codex/hooks/
+.codex/hooks.json
+openspec/.vector-search.db*
+/target/
+.collab/
+.claude/settings.json
+
+CLAUDE.md
+AGENTS.md
+docs/PLAN.md

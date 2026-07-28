@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible problem on a supported macOS version
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Security vulnerabilities must use private vulnerability reporting instead of this public form.
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Include the full value from `sw_vers -productVersion`.
+      placeholder: "15.7.1"
+    validations:
+      required: true
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust version
+      description: Include the output from `rustc --version`.
+      placeholder: "rustc 1.97.0"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest HTML entry and exact commands needed to reproduce the problem.
+      placeholder: |
+        1. Run collab open ...
+        2. Submit ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the complete error envelope or log output after removing secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Additional evidence
+      description: Attach screenshots or command output that help verify the problem. Remove `.collab/session.json` tokens first.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I reproduced this on macOS 15 or later.
+          required: true
+        - label: I removed control tokens, credentials, and private project content.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

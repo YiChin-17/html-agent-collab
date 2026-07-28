@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Preview Draft Fixture</title>
+    <style>
+      button, textarea, pre {
+        all: unset !important;
+        position: fixed !important;
+        z-index: 2147483647 !important;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="hero">
+      <h1 id="hero-title">Hello</h1>
+    </main>
+    <pre id="preview-draft-result">pending</pre>
+    <script>
+      document.addEventListener("DOMContentLoaded", async function () {
+        var resources = await Promise.all([
+          fetch("/web/overlay.js").then(function (response) { return response.text(); }),
+          fetch("/web/overlay.css").then(function (response) { return response.text(); })
+        ]);
+        window.eval(resources[0].replace("__OVERLAY_CSS_JSON__", JSON.stringify(resources[1])));
+        var overlay = window.__collabOverlay;
+        var source = await fetch(location.pathname).then(function (response) {
+          return response.text();
+        });
+        overlay.loadPreviewDraftSource({ pageUrl: location.href, html: source });
+        var target = document.querySelector("#hero-title");
+        overlay.setActive(true);
+        overlay.setMode("draft");
+        var targetRect = target.getBoundingClientRect();
+        target.dispatchEvent(new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          clientX: targetRect.left + targetRect.width / 2,
+          clientY: targetRect.top + targetRect.height / 2
+        }));
+        var cleanSubmit = await overlay.submitPreviewDraft();
+        var shadowRoot = document.querySelector("collab-overlay-host").shadowRoot;
+        var selectionHighlightCount = shadowRoot.querySelectorAll(
+          ".collab-draft-highlight"
+        ).length;
+        for (var index = 1; index <= 51; index++) {
+          overlay.applyPreviewDraft({
+            html: source.replace(
+              "<h1 id=\"hero-title\">Hello</h1>",
+              "<h1 id=\"hero-title\" data-edit=\"" + index + "\">Hello " + index + "</h1>"
+            )
+          });
+        }
+        var afterEdits = overlay.previewDraftState();
+        var refocus = overlay.openPreviewDraftFor(document.querySelector("#hero"));
+        for (var undo = 0; undo < 50; undo++) overlay.undoPreviewDraft();
+        var afterUndos = overlay.previewDraftState();
+        for (var redo = 0; redo < 50; redo++) overlay.redoPreviewDraft();
+        var afterRedos = overlay.previewDraftState();
+        overlay.resetPreviewDraft();
+        overlay.openPreviewDraftFor(document.querySelector("#hero-title"));
+        overlay.applyPreviewDraft({
+          html: source.replace(
+            "<h1 id=\"hero-title\">Hello</h1>",
+            "<h1 id=\"hero-title\" data-submit=\"failed\">Unsaved</h1>"
+          )
+        });
+        var failedSubmit = await overlay.submitPreviewDraft();
+        var afterFailedSubmit = overlay.previewDraftState();
+        overlay.resetPreviewDraft();
+        document.querySelector("#preview-draft-result").textContent = JSON.stringify({
+          cleanSubmit: cleanSubmit,
+          afterEdits: afterEdits,
+          afterUndos: afterUndos,
+          afterRedos: afterRedos,
+          afterReset: overlay.previewDraftState(),
+          failedSubmit: failedSubmit,
+          afterFailedSubmit: afterFailedSubmit,
+          renderedHtml: document.querySelector("#hero-title").outerHTML,
+          hostCount: overlay.hostCount(),
+          selectionHighlightCount: selectionHighlightCount,
+          refocusErrorCode: refocus.error ? refocus.error.code : null,
+          shadowHighlightCountAfterReset: shadowRoot.querySelectorAll(
+            ".collab-draft-highlight"
+          ).length,
+          previewDraftActionCount: Array.from(
+            shadowRoot.querySelectorAll("button")
+          ).filter(function (button) {
+            return /^(Undo|Redo|Reset|Apply to source|Continue editing)$/.test(
+              button.textContent
+            );
+          }).length
+        });
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,48 @@
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+# Yanked crates and RustSec advisories fail unless a reviewed exception is added.
+ignore = [
+    { id = "RUSTSEC-2025-0075", reason = "rust-unic is transitive through Tauri urlpattern and has no safe upgrade" },
+    { id = "RUSTSEC-2025-0080", reason = "rust-unic is transitive through Tauri urlpattern and has no safe upgrade" },
+    { id = "RUSTSEC-2025-0081", reason = "rust-unic is transitive through Tauri urlpattern and has no safe upgrade" },
+    { id = "RUSTSEC-2025-0098", reason = "rust-unic is transitive through Tauri urlpattern and has no safe upgrade" },
+    { id = "RUSTSEC-2025-0100", reason = "rust-unic is transitive through Tauri urlpattern and has no safe upgrade" },
+]
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+ignore = false
+registries = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

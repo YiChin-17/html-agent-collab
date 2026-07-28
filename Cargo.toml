@@ -1,0 +1,54 @@
+[package]
+name = "collab"
+version = "0.3.0"
+edition = "2024"
+description = "macOS preview collaboration tool for agent workflows"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/YiChin-17/html-agent-collab"
+homepage = "https://github.com/YiChin-17/html-agent-collab"
+readme = "README.md"
+rust-version = "1.97"
+publish = false
+keywords = ["macos", "wkwebview", "html", "preview", "collaboration"]
+categories = ["development-tools"]
+exclude = [
+    ".agents/**",
+    ".claude/**",
+    ".github/**",
+    ".spectra*",
+    "openspec/**",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/PLAN.md",
+]
+
+[lib]
+name = "collab"
+path = "src/lib.rs"
+
+[[bin]]
+name = "collab"
+path = "src/main.rs"
+
+[dependencies]
+tauri = "2"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+axum = "0.8"
+tower-http = { version = "0.7", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.4"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+libc = "0.2"
+notify = "8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSError", "NSData", "NSDictionary", "NSGeometry", "NSNotification", "NSValue", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3", features = ["NSAccessibilityProtocols", "NSAlert", "NSApplication", "NSAttributedString", "NSBitmapImageRep", "NSButton", "NSCell", "NSColor", "NSControl", "NSFont", "NSFontDescriptor", "NSGraphics", "NSImage", "NSImageRep", "NSLayoutManager", "NSMenu", "NSMenuItem", "NSPasteboard", "NSPopUpButton", "NSPopover", "NSResponder", "NSScreen", "NSScrollView", "NSSplitView", "NSStackView", "NSText", "NSTextField", "NSTextFieldCell", "NSTitlebarAccessoryViewController", "NSTextView", "NSUserInterfaceLayout", "NSView", "NSViewController", "NSWindow", "block2"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKNavigation", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }
+
+[build-dependencies]
+tauri-build = "2"

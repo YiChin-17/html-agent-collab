@@ -1,0 +1,79 @@
+name: CI
+
+"on":
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Confirm pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Check Rust formatting
+        run: cargo fmt -- --check
+
+  test:
+    name: cargo test on macOS 15
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Confirm pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Run test suite
+        run: cargo test
+
+  clippy:
+    name: cargo clippy on macOS 15
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Confirm pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Deny Clippy warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  package:
+    name: cargo package on macOS 15
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Confirm pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Verify source package
+        run: cargo package
+
+  dependencies:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check advisories, licenses, bans, and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  secrets:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Scan Git history
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
