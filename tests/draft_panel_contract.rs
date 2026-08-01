@@ -266,7 +266,7 @@ fn dashboard_places_draft_with_existing_session_controls() {
         assert!(source.contains(label), "missing session control: {label}");
     }
     let row = source
-        .find("let views: [&NSView; 10]")
+        .find("let views: [&NSView; 11]")
         .expect("native control row views");
     let row = &source[row..];
     let end = row

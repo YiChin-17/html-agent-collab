@@ -14,6 +14,9 @@ use serde_json::Value;
 pub const FEEDBACK_DIR: &str = "feedback";
 pub const FEEDBACK_VIEW_LIMIT: usize = 256;
 pub const PREVIEW_DRAFT_DOCUMENT_LIMIT_BYTES: usize = 262_144;
+/// spec「Painting capture regions are geometry-based and bounded」：一筆 painting
+/// 最多發布 8 張 PNG，超過即視為 malformed payload。
+pub const CAPTURE_REGION_LIMIT: usize = 8;
 
 pub const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(300);
 
@@ -214,6 +217,15 @@ impl From<io::Error> for QueueError {
     }
 }
 
+/// 一個 viewport-sized 擷取區，座標為 document-space CSS pixels。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CaptureRegion {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// overlay 送入的原始 payload（未含 server 指派欄位）。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -230,11 +242,66 @@ pub struct IncomingFeedback {
     pub svg: Option<String>,
     #[serde(default)]
     pub preview_draft: Option<PreviewDraft>,
+    /// painting 專用：由 `validate` 從 `viewport.captureRegions` 解析後填入，
+    /// 不直接反序列化不可信 payload。
+    #[serde(skip)]
+    pub capture_regions: Vec<CaptureRegion>,
 }
 
 /// 驗證 overlay payload schema（design 風險節：專用 endpoint 必須驗證 schema）。
+fn finite_number(value: &Value, field: &str) -> Result<f64, String> {
+    value
+        .get(field)
+        .and_then(Value::as_f64)
+        .filter(|number| number.is_finite())
+        .ok_or_else(|| format!("capture plan field {field} must be a finite number"))
+}
+
+/// spec「Server rejects an invalid capture plan」：region 數量、有限性、正負與
+/// document bounds 全部在建立任何 artifact 之前檢查，不可信 payload 直接拒絕。
+fn parse_capture_regions(viewport: &Value) -> Result<Vec<CaptureRegion>, String> {
+    let document_width = finite_number(viewport, "documentWidth")?;
+    let document_height = finite_number(viewport, "documentHeight")?;
+    if document_width <= 0.0 || document_height <= 0.0 {
+        return Err("capture plan documentWidth and documentHeight must be positive".into());
+    }
+    let regions = viewport
+        .get("captureRegions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "painting viewport requires a captureRegions array".to_string())?;
+    if regions.is_empty() || regions.len() > CAPTURE_REGION_LIMIT {
+        return Err(format!(
+            "painting requires between 1 and {CAPTURE_REGION_LIMIT} capture regions"
+        ));
+    }
+    regions
+        .iter()
+        .map(|region| {
+            let x = finite_number(region, "x")?;
+            let y = finite_number(region, "y")?;
+            let width = finite_number(region, "width")?;
+            let height = finite_number(region, "height")?;
+            if x < 0.0 || y < 0.0 {
+                return Err("capture regions must have non-negative coordinates".into());
+            }
+            if width <= 0.0 || height <= 0.0 {
+                return Err("capture regions must have positive dimensions".into());
+            }
+            if x + width > document_width || y + height > document_height {
+                return Err("capture regions must stay inside the document bounds".into());
+            }
+            Ok(CaptureRegion {
+                x,
+                y,
+                width,
+                height,
+            })
+        })
+        .collect()
+}
+
 pub fn validate(payload: Value) -> Result<IncomingFeedback, String> {
-    let incoming: IncomingFeedback = serde_json::from_value(payload)
+    let mut incoming: IncomingFeedback = serde_json::from_value(payload)
         .map_err(|e| format!("invalid feedback kind or payload: {e}"))?;
     if !incoming.viewport.is_object() {
         return Err("feedback viewport must be an object".into());
@@ -278,6 +345,7 @@ pub fn validate(payload: Value) -> Result<IncomingFeedback, String> {
             if !has_svg {
                 return Err("painting feedback requires serialized SVG markup".into());
             }
+            incoming.capture_regions = parse_capture_regions(&incoming.viewport)?;
         }
         FeedbackKind::PreviewDraft => validate_preview_draft(&incoming)?,
     }
@@ -1198,11 +1266,34 @@ mod tests {
         );
     }
 
+    fn painting_payload(regions: Value) -> Value {
+        json!({
+            "kind": "painting",
+            "text": "move these cards upward",
+            "pageUrl": "http://127.0.0.1:1234/",
+            "viewport": {
+                "width": 1200,
+                "height": 800,
+                "scrollX": 0,
+                "scrollY": 0,
+                "documentWidth": 1200,
+                "documentHeight": 4000,
+                "captureRegions": regions,
+            },
+            "elements": [],
+            "marks": [{"type": "rect", "x": 1, "y": 2, "width": 3, "height": 4}],
+            "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        })
+    }
+
+    fn region(y: f64) -> Value {
+        json!({"x": 0.0, "y": y, "width": 1200.0, "height": 800.0})
+    }
+
     #[test]
     fn painting_requires_marks_and_svg() {
-        let mut painting = valid_payload();
-        painting["kind"] = json!("painting");
-        painting["elements"] = json!([]);
+        let mut painting = painting_payload(json!([region(0.0)]));
+        painting["marks"] = json!([]);
         assert!(
             validate(painting.clone())
                 .unwrap_err()
@@ -1210,13 +1301,83 @@ mod tests {
         );
 
         painting["marks"] = json!([{"type": "rect", "x": 1, "y": 2, "width": 3, "height": 4}]);
+        painting["svg"] = json!("");
         assert!(validate(painting.clone()).unwrap_err().contains("SVG"));
 
         painting["svg"] = json!("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>");
         let incoming = validate(painting).unwrap();
         assert_eq!(incoming.kind, "painting");
+        assert_eq!(incoming.capture_regions.len(), 1);
         let record = prepare(incoming);
         assert_eq!(record.marks[0]["type"], "rect");
+    }
+
+    // spec「Server rejects an invalid capture plan」：不可信 payload 的 region
+    // 數量、有限性、正負與 document bounds 都必須在建立任何檔案前被擋下。
+    #[test]
+    fn painting_capture_plan_must_be_bounded_and_inside_the_document() {
+        let too_many = (0..=CAPTURE_REGION_LIMIT)
+            .map(|index| region(index as f64 * 10.0))
+            .collect::<Vec<_>>();
+        let cases = [
+            (json!([]), "between 1 and 8"),
+            (json!(Value::from(too_many)), "between 1 and 8"),
+            (
+                json!([{"x": 0.0, "y": 0.0, "width": 1200.0}]),
+                "finite number",
+            ),
+            (
+                json!([{"x": -1.0, "y": 0.0, "width": 1200.0, "height": 800.0}]),
+                "non-negative",
+            ),
+            (
+                json!([{"x": 0.0, "y": 0.0, "width": 0.0, "height": 800.0}]),
+                "positive",
+            ),
+            (
+                json!([{"x": 0.0, "y": 3600.0, "width": 1200.0, "height": 800.0}]),
+                "document bounds",
+            ),
+            (
+                json!([{"x": 200.0, "y": 0.0, "width": 1200.0, "height": 800.0}]),
+                "document bounds",
+            ),
+        ];
+        for (regions, expected) in cases {
+            let error = validate(painting_payload(regions.clone())).unwrap_err();
+            assert!(
+                error.contains(expected),
+                "regions {regions} should be rejected with {expected}, got: {error}"
+            );
+        }
+
+        let mut missing = painting_payload(json!([region(0.0)]));
+        missing["viewport"]
+            .as_object_mut()
+            .unwrap()
+            .remove("captureRegions");
+        assert!(
+            validate(missing).unwrap_err().contains("captureRegions"),
+            "captureRegions is required for painting submissions"
+        );
+
+        let mut without_document = painting_payload(json!([region(0.0)]));
+        without_document["viewport"]
+            .as_object_mut()
+            .unwrap()
+            .remove("documentHeight");
+        assert!(
+            validate(without_document)
+                .unwrap_err()
+                .contains("documentHeight")
+        );
+
+        let full = (0..CAPTURE_REGION_LIMIT)
+            .map(|index| region(index as f64 * 400.0))
+            .collect::<Vec<_>>();
+        let incoming = validate(painting_payload(Value::from(full))).unwrap();
+        assert_eq!(incoming.capture_regions.len(), CAPTURE_REGION_LIMIT);
+        assert_eq!(incoming.capture_regions[1].y, 400.0);
     }
 
     #[test]

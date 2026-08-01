@@ -138,7 +138,8 @@ async fn preview_draft_submission_preserves_fixture_and_stays_pending_across_rel
         while let Some(command) = receiver.recv().await {
             match command {
                 collab::webview::WebviewCommand::SetCollaborationActive { respond, .. }
-                | collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
+                | collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | collab::webview::WebviewCommand::ToggleOfflinePaint { respond } => {
                     let _ = respond.send(Ok(()));
                 }
                 _ => {}
@@ -225,6 +226,120 @@ async fn preview_draft_submission_preserves_fixture_and_stays_pending_across_rel
     assert_eq!(file_hash(&fixture), newer_hash);
 }
 
+/// spec「Multiple capture regions are published」+ design「Acceptance criteria」：
+/// 長頁面的 multi-region painting 仍然是一筆 feedback、一個 ID，agent 只會被喚醒一次。
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_region_painting_stays_one_feedback_with_ordered_attachments() {
+    let root = temp_root();
+    let fixture = root.join("index.html");
+    std::fs::write(&fixture, "<!doctype html><title>long page</title>").unwrap();
+    let token = session::generate_token();
+    let (commands, mut receiver) = collab::webview::command_channel();
+    tokio::spawn(async move {
+        while let Some(command) = receiver.recv().await {
+            match command {
+                collab::webview::WebviewCommand::SetCollaborationActive { respond, .. }
+                | collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | collab::webview::WebviewCommand::ToggleOfflinePaint { respond } => {
+                    let _ = respond.send(Ok(()));
+                }
+                collab::webview::WebviewCommand::CapturePainting {
+                    regions,
+                    output_paths,
+                    respond,
+                } => {
+                    assert_eq!(regions.len(), output_paths.len());
+                    for path in &output_paths {
+                        std::fs::write(path, b"\x89PNG-stub").unwrap();
+                    }
+                    let _ = respond.send(Ok(output_paths));
+                }
+                _ => {}
+            }
+        }
+    });
+    let server = server::start(ServerConfig {
+        project_root: root.clone(),
+        session_id: "sess-multi-region".into(),
+        token: token.clone(),
+        commands,
+    })
+    .await
+    .unwrap();
+    let mut session = SessionFile::new(root.clone(), fixture.clone(), server.port, token);
+    session.session_id = "sess-multi-region".into();
+    session::write_session_file(&session).unwrap();
+    let project = root.to_str().unwrap();
+
+    let attach = collab(&["attach", "--project", project, "--agent", "codex"]);
+    assert!(attach.status.success());
+    let attachment = envelope(&attach)["data"]["attachment"]["attachmentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let submitted: Value = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/__collab__/overlay/feedback",
+            server.port
+        ))
+        .json(&serde_json::json!({
+            "kind": "painting",
+            "text": "three separated marks",
+            "pageUrl": "http://127.0.0.1/",
+            "viewport": {
+                "width": 1200, "height": 800, "scrollX": 0, "scrollY": 0,
+                "documentWidth": 1200, "documentHeight": 6000,
+                "captureRegions": [
+                    {"x": 0, "y": 0, "width": 1200, "height": 800},
+                    {"x": 0, "y": 2000, "width": 1200, "height": 800},
+                    {"x": 0, "y": 4000, "width": 1200, "height": 800},
+                ],
+            },
+            "elements": [],
+            "marks": [
+                {"type": "rect", "x": 10, "y": 10, "width": 100, "height": 60},
+                {"type": "rect", "x": 10, "y": 2400, "width": 100, "height": 60},
+                {"type": "rect", "x": 10, "y": 4400, "width": 100, "height": 60},
+            ],
+            "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let feedback_id = submitted["id"].as_str().unwrap().to_string();
+
+    assert_eq!(collab::feedback::list_records(&root).unwrap().len(), 1);
+    let record = collab::feedback::read_record(&root, &feedback_id).unwrap();
+    assert_eq!(record.attachments.len(), 4);
+    assert!(
+        record.attachments[..3]
+            .iter()
+            .all(|path| path.ends_with(".png"))
+    );
+    assert!(record.attachments[3].ends_with(".svg"));
+
+    let wait = collab(&[
+        "wait",
+        "--project",
+        project,
+        "--attachment",
+        &attachment,
+        "--json",
+    ]);
+    assert_eq!(envelope(&wait)["data"]["item"]["id"], feedback_id.as_str());
+    assert_eq!(
+        envelope(&wait)["data"]["item"]["viewport"]["captureRegions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn one_scripted_loop_resolves_first_feedback_then_fails_second() {
     let root = temp_root();
@@ -234,7 +349,8 @@ async fn one_scripted_loop_resolves_first_feedback_then_fails_second() {
         while let Some(command) = receiver.recv().await {
             match command {
                 collab::webview::WebviewCommand::SetCollaborationActive { respond, .. }
-                | collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
+                | collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | collab::webview::WebviewCommand::ToggleOfflinePaint { respond } => {
                     let _ = respond.send(Ok(()));
                 }
                 _ => {}
@@ -343,7 +459,8 @@ async fn second_feedback_only_delivered_after_first_confirmed_terminal() {
         while let Some(command) = receiver.recv().await {
             match command {
                 collab::webview::WebviewCommand::SetCollaborationActive { respond, .. }
-                | collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
+                | collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | collab::webview::WebviewCommand::ToggleOfflinePaint { respond } => {
                     let _ = respond.send(Ok(()));
                 }
                 _ => {}
@@ -431,7 +548,8 @@ async fn interruption_before_terminal_recovers_to_pending() {
         while let Some(command) = receiver.recv().await {
             match command {
                 collab::webview::WebviewCommand::SetCollaborationActive { respond, .. }
-                | collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
+                | collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | collab::webview::WebviewCommand::ToggleOfflinePaint { respond } => {
                     let _ = respond.send(Ok(()));
                 }
                 _ => {}

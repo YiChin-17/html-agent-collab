@@ -84,6 +84,14 @@ async fn clean_environment_runs_the_full_cli_core_workflow() {
                 WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
                     let _ = respond.send(Ok(()));
                 }
+                WebviewCommand::ToggleOfflinePaint { respond } => {
+                    let _ = respond.send(Ok(()));
+                }
+                WebviewCommand::CapturePainting { respond, .. } => {
+                    let _ = respond.send(Err(collab::webview::CommandError::SnapshotFailed(
+                        "painting capture is not used by this test".into(),
+                    )));
+                }
                 WebviewCommand::Eval {
                     expression,
                     respond,

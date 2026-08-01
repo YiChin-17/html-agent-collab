@@ -216,6 +216,70 @@ fn successful_attach_closes_the_connect_handoff() {
     assert!(reducer.feedback_tools_visible());
 }
 
+// spec「Persistent native collaboration dashboard」：zero connected 時 Paint 是
+// Offline Paint 的唯一入口，且沿用既有 native 物件生命週期與 selector 型別。
+#[test]
+fn native_offline_paint_button_is_the_only_zero_connected_entry() {
+    let dashboard = fs::read_to_string("src/dashboard.rs").unwrap();
+
+    for contract in [
+        "offline_paint: usize",
+        "offline_paint: Retained::as_ptr(&offline_paint) as usize",
+        "Some(sel!(offlinePaint:))",
+        "DashboardControl::OfflinePaint",
+        "DashboardAction::ToggleOfflinePaint",
+        r#"NSString::from_str("Paint")"#,
+        r#"NSString::from_str("Offline Paint")"#,
+        "offline_paint.setHidden(!offline_paint_available)",
+        "offline_paint.setEnabled(offline_paint_available && !pending)",
+    ] {
+        assert!(
+            dashboard.contains(contract),
+            "missing native Offline Paint contract: {contract}"
+        );
+    }
+    assert!(
+        !dashboard.contains("WebviewWindowBuilder::new"),
+        "Offline Paint must not introduce a second WebView"
+    );
+}
+
+// spec「Selected attachment is active」/「…pause-requested」/「…paused」：
+// Offline Paint 的可見性只由 reducer 的 zero-connected 判斷驅動。
+#[test]
+fn offline_paint_visibility_follows_the_reducer_state_matrix() {
+    let disconnected = DashboardReducer::new(build_snapshot(
+        1,
+        DashboardRuntimeState::Running,
+        "0123456789abcdef",
+        &[],
+        &[],
+        None,
+        None,
+    ));
+    assert!(disconnected.offline_paint_available());
+
+    for state in [
+        CollaborationState::Active,
+        CollaborationState::PauseRequested,
+        CollaborationState::Paused,
+    ] {
+        let connected = DashboardReducer::new(build_snapshot(
+            1,
+            DashboardRuntimeState::Running,
+            "0123456789abcdef",
+            &[attachment(state)],
+            &[],
+            Some("att-private"),
+            None,
+        ));
+        assert!(
+            !connected.offline_paint_available(),
+            "Offline Paint must stay hidden for {state:?}"
+        );
+    }
+}
+
 #[test]
 fn toolbar_does_not_display_inline_feedback_text() {
     let dashboard = fs::read_to_string("src/dashboard.rs").unwrap();

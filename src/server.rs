@@ -397,6 +397,10 @@ async fn run_dashboard_actions(
                 )
                 .await
             }
+            DashboardAction::ToggleOfflinePaint => match toggle_offline_paint(&state).await {
+                Ok(()) => (StatusCode::OK, Json(json!({ "status": "toggled" }))),
+                Err(response) => response,
+            },
             DashboardAction::Close => match close_all_attachments(&state).await {
                 Ok(()) => {
                     let revision =
@@ -431,6 +435,7 @@ fn dashboard_action_error(body: &Value) -> DashboardActionError {
         "busy" => DashboardActionError::Busy,
         "attachment-not-found" => DashboardActionError::AttachmentNotFound,
         "attachment-inactive" | "pause-pending" => DashboardActionError::AttachmentInactive,
+        "offline-paint-unavailable" => DashboardActionError::OfflinePaintUnavailable,
         "feedback-storage-error" => DashboardActionError::Storage(message),
         _ => DashboardActionError::Internal(message),
     }
@@ -1295,6 +1300,7 @@ async fn overlay_painting_feedback(
     mut incoming: crate::feedback::IncomingFeedback,
 ) -> (StatusCode, Json<Value>) {
     let svg_markup = incoming.svg.take().expect("validated painting has svg");
+    let regions = std::mem::take(&mut incoming.capture_regions);
     let mut record = crate::feedback::prepare(incoming);
 
     let prepare_root = state.project_root.clone();
@@ -1315,29 +1321,27 @@ async fn overlay_painting_feedback(
         .parent()
         .expect("prepared SVG path has a parent")
         .to_path_buf();
-    let png_path = dir.join(format!("{}.png", record.id));
+    // `viewport.captureRegions[n]` 對應 `attachments[n]`；SVG 永遠是最後一個。
+    let png_paths = (0..regions.len())
+        .map(|index| dir.join(format!("{}-{index}.png", record.id)))
+        .collect::<Vec<_>>();
     let (respond, receive) = tokio::sync::oneshot::channel();
-    let command = WebviewCommand::Snapshot {
-        output_path: png_path.clone(),
+    let command = WebviewCommand::CapturePainting {
+        regions,
+        output_paths: png_paths.clone(),
         respond,
     };
     match submit_command(state, command, receive).await {
         Ok(written) => {
-            record.attachments = vec![
-                written.to_string_lossy().into_owned(),
-                svg_path.to_string_lossy().into_owned(),
-            ];
+            record.attachments = written
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .chain(std::iter::once(svg_path.to_string_lossy().into_owned()))
+                .collect();
         }
         Err(response) => {
-            // 不留下 partial artifact 當成功結果。
-            let cleanup_path = svg_path.clone();
-            let _ =
-                blocking_io::<(), io::Error, _>(move || match std::fs::remove_file(cleanup_path) {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                    Err(error) => Err(error),
-                })
-                .await;
+            // 不留下 partial artifact 當成功結果：本次建立的每一張 PNG 與 SVG 都清掉。
+            remove_painting_artifacts(&png_paths, &svg_path).await;
             return response;
         }
     }
@@ -1361,23 +1365,30 @@ async fn overlay_painting_feedback(
             )
         }
         Err(e) => {
-            let cleanup_paths = [png_path, svg_path];
-            let cleanup_result = blocking_io::<(), io::Error, _>(move || {
-                for path in cleanup_paths {
-                    match std::fs::remove_file(&path) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error),
-                    }
-                }
-                Ok(())
-            })
-            .await;
-            if let Err(cleanup_error) = cleanup_result {
-                eprintln!("cannot clean unpublished painting artifacts: {cleanup_error}");
-            }
+            remove_painting_artifacts(&png_paths, &svg_path).await;
             internal_error(format!("cannot persist feedback: {e}"))
         }
+    }
+}
+
+/// design「Failure modes」：任一 capture、restoration 或 record write 失敗，
+/// 都必須移除本次建立的全部 PNG 與 SVG，不得留下未發布的 artifact。
+async fn remove_painting_artifacts(png_paths: &[PathBuf], svg_path: &FsPath) {
+    let mut cleanup_paths = png_paths.to_vec();
+    cleanup_paths.push(svg_path.to_path_buf());
+    let cleanup_result = blocking_io::<(), io::Error, _>(move || {
+        for path in cleanup_paths {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    })
+    .await;
+    if let Err(cleanup_error) = cleanup_result {
+        eprintln!("cannot clean unpublished painting artifacts: {cleanup_error}");
     }
 }
 
@@ -1969,6 +1980,42 @@ async fn detach_attachment(
     })
 }
 
+/// spec「Native Offline Paint command is lifecycle-gated」：eligibility 檢查與
+/// attachment lifecycle 變更共用同一把鎖，因此 attach 與 toggle 只有一種可觀察順序；
+/// 先取得鎖的一方決定結果，成功的 attach 一定會關閉並清除離線 Paint。
+async fn toggle_offline_paint(state: &ControlState) -> Result<(), (StatusCode, Json<Value>)> {
+    let _lifecycle = state.attachment_lifecycle.lock().await;
+    if *state.shutdown_tx.borrow() {
+        return Err(offline_paint_unavailable());
+    }
+    let connected = {
+        let attachments = state.attachments.lock().unwrap();
+        attachments
+            .iter()
+            .any(|attachment| attachment.attachment.collaboration_state.is_connected())
+    };
+    if connected {
+        return Err(offline_paint_unavailable());
+    }
+    let (respond, receive) = tokio::sync::oneshot::channel();
+    submit_command(
+        state,
+        WebviewCommand::ToggleOfflinePaint { respond },
+        receive,
+    )
+    .await
+}
+
+fn offline_paint_unavailable() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "code": "offline-paint-unavailable",
+            "message": "Offline Paint is available only while no agent is connected",
+        })),
+    )
+}
+
 async fn set_collaboration_active(
     state: &ControlState,
     active: bool,
@@ -2444,14 +2491,17 @@ mod tests {
             let mut publish_rx = Some(publish_rx);
             while let Some(command) = commands.recv().await {
                 match command {
-                    WebviewCommand::Snapshot {
-                        output_path,
+                    WebviewCommand::CapturePainting {
+                        output_paths,
                         respond,
+                        ..
                     } => {
-                        std::fs::write(&output_path, b"\x89PNG-stub").unwrap();
+                        for path in &output_paths {
+                            std::fs::write(path, b"\x89PNG-stub").unwrap();
+                        }
                         snapshot_seen_tx.take().unwrap().send(()).unwrap();
                         publish_rx.take().unwrap().await.unwrap();
-                        respond.send(Ok(output_path)).unwrap();
+                        respond.send(Ok(output_paths)).unwrap();
                     }
                     WebviewCommand::SetCollaborationActive { respond, .. }
                     | WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
@@ -2469,7 +2519,11 @@ mod tests {
                     "kind": "painting",
                     "text": "publish before detach",
                     "pageUrl": "http://127.0.0.1/",
-                    "viewport": {"width": 800, "height": 600, "scrollX": 0, "scrollY": 0},
+                    "viewport": {
+                        "width": 800, "height": 600, "scrollX": 0, "scrollY": 0,
+                        "documentWidth": 800, "documentHeight": 1200,
+                        "captureRegions": [{"x": 0, "y": 0, "width": 800, "height": 600}],
+                    },
                     "elements": [],
                     "marks": [{"type": "line", "x": 1, "y": 2}],
                     "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",

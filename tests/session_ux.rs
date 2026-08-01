@@ -295,6 +295,54 @@ fn pause_and_resume_help_define_same_attachment_workflow() {
     }
 }
 
+// spec「Inactive collaboration overlay state」+「Feedback tools follow collaboration
+// availability」：collaboration 可用性與離線 Paint 開關是兩個獨立狀態，離線 Paint
+// 不得暴露 Element、Note、Send paint 或 feedback editor。
+#[test]
+fn overlay_separates_collaboration_availability_from_offline_paint() {
+    let overlay = std::fs::read_to_string("web/overlay.js").unwrap();
+
+    for contract in [
+        "function setActive(active)",
+        "function toggleOfflinePaint()",
+        "function closeOfflinePaint()",
+        "state.offlinePaint",
+        "function paintingAvailable()",
+        "toggleOfflinePaint: toggleOfflinePaint",
+        "offlinePaintOpen: function ()",
+        // collaboration 專屬控制項只在 active 時出現。
+        r#"ui.commentButton.style.display = state.active ? "" : "none";"#,
+        r#"ui.noteButton.style.display = state.active ? "" : "none";"#,
+        "state.active && (state.mode === \"paint\" || state.marks.length)",
+        // 離線 marks 不得走任何提交路徑。
+        "if (!state.active) return Promise.resolve(null);",
+    ] {
+        assert!(
+            overlay.contains(contract),
+            "missing offline paint separation contract: {contract}"
+        );
+    }
+}
+
+// spec「Dashboard and feedback toolbar have separate visibility lifecycles」：
+// dashboard 跟隨 preview runtime，頁面 collaboration toolbar 跟隨 collaboration 可用性。
+#[test]
+fn dashboard_and_offline_paint_follow_separate_lifecycles() {
+    let dashboard = std::fs::read_to_string("src/dashboard.rs").unwrap();
+
+    for contract in [
+        "pub fn dashboard_visible(&self)",
+        "pub fn feedback_tools_visible(&self)",
+        "pub fn offline_paint_available(&self)",
+        "DashboardRuntimeState::Running",
+    ] {
+        assert!(
+            dashboard.contains(contract),
+            "missing separate lifecycle contract: {contract}"
+        );
+    }
+}
+
 #[test]
 fn acceptance_script_covers_stopped_preview_connection_handoff() {
     let script = std::fs::read_to_string("scripts/session-ux-acceptance.sh").unwrap();

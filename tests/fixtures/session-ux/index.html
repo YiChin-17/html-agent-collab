@@ -53,6 +53,17 @@
     #manual-count {
       margin-top: 18px;
     }
+    /* 長頁面：讓 #scroll-anchor 遠離第一個 viewport，驗證 mark 錨定在內容而非螢幕。 */
+    .spacer {
+      height: 1600px;
+    }
+    #scroll-anchor {
+      width: min(760px, calc(100vw - 64px));
+      padding: 40px;
+      border-radius: 18px;
+      background: #ffe0d0;
+      font-size: 20px;
+    }
   </style>
 </head>
 <body data-reload="initial">
@@ -66,6 +77,9 @@
     </div>
     <p id="manual-count">Manual clicks: 0</p>
   </main>
+  <div class="spacer"></div>
+  <section id="scroll-anchor">Anchored target far below the first viewport.</section>
+  <div class="spacer"></div>
   <script>
     document.querySelector("#manual-button").addEventListener("click", function () {
       var count = Number(document.body.dataset.manualClicks || "0") + 1;

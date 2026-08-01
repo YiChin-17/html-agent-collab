@@ -2,8 +2,8 @@ use collab::core::{
     Attachment, CollaborationState, DashboardAction, DashboardRuntimeState, DashboardSnapshot,
 };
 use collab::dashboard::{
-    DASHBOARD_ACTION_CAPACITY, DASHBOARD_FEEDBACK_LIMIT, DashboardReducer, FEEDBACK_MARKER_LIMIT,
-    build_marker_snapshot, build_snapshot, channel,
+    DASHBOARD_ACTION_CAPACITY, DASHBOARD_FEEDBACK_LIMIT, DashboardControl, DashboardReducer,
+    FEEDBACK_MARKER_LIMIT, build_marker_snapshot, build_snapshot, channel,
 };
 use collab::feedback::{FeedbackKind, FeedbackRecord, FeedbackState};
 
@@ -221,6 +221,152 @@ async fn action_channel_has_fixed_capacity_and_per_action_completion() {
     let request = receiver.recv().await.unwrap();
     request.respond(Ok(2));
     assert_eq!(completions.remove(0).await.unwrap().unwrap(), 2);
+}
+
+/// design「Observable state matrix」的一列：情境、attachments、runtime，
+/// 以及 Native Paint、Connect agent、頁面 collaboration toolbar 的預期可見性。
+struct StateMatrixRow {
+    label: &'static str,
+    attachments: Vec<Attachment>,
+    runtime: DashboardRuntimeState,
+    paint: bool,
+    connect: bool,
+    toolbar: bool,
+}
+
+// design「Observable state matrix」：Native Paint、Connect agent 與頁面
+// collaboration toolbar 的可見性逐列固定，避免離線標記與待處理 feedback 混淆。
+#[test]
+fn observable_state_matrix_gates_offline_paint_and_collaboration_toolbar() {
+    let cases = [
+        StateMatrixRow {
+            label: "running with zero connected",
+            attachments: vec![],
+            runtime: DashboardRuntimeState::Running,
+            paint: true,
+            connect: true,
+            toolbar: false,
+        },
+        StateMatrixRow {
+            label: "active attachment",
+            attachments: vec![attachment("agent-a", CollaborationState::Active)],
+            runtime: DashboardRuntimeState::Running,
+            paint: false,
+            connect: false,
+            toolbar: true,
+        },
+        StateMatrixRow {
+            label: "pause-requested attachment",
+            attachments: vec![attachment("agent-a", CollaborationState::PauseRequested)],
+            runtime: DashboardRuntimeState::Running,
+            paint: false,
+            connect: false,
+            toolbar: false,
+        },
+        StateMatrixRow {
+            label: "paused attachment",
+            attachments: vec![attachment("agent-a", CollaborationState::Paused)],
+            runtime: DashboardRuntimeState::Running,
+            paint: false,
+            connect: false,
+            toolbar: false,
+        },
+        StateMatrixRow {
+            label: "one paused plus another active",
+            attachments: vec![
+                attachment("agent-a", CollaborationState::Paused),
+                attachment("agent-b", CollaborationState::Active),
+            ],
+            runtime: DashboardRuntimeState::Running,
+            paint: false,
+            connect: false,
+            toolbar: true,
+        },
+        StateMatrixRow {
+            label: "only inactive attachments",
+            attachments: vec![attachment("agent-a", CollaborationState::Inactive)],
+            runtime: DashboardRuntimeState::Running,
+            paint: true,
+            connect: true,
+            toolbar: false,
+        },
+        StateMatrixRow {
+            label: "preview closed",
+            attachments: vec![],
+            runtime: DashboardRuntimeState::Closed,
+            paint: false,
+            connect: false,
+            toolbar: false,
+        },
+    ];
+
+    for case in cases {
+        let reducer = DashboardReducer::new(build_snapshot(
+            1,
+            case.runtime,
+            "test-preview-session",
+            &case.attachments,
+            &[],
+            None,
+            None,
+        ));
+        let label = case.label;
+
+        assert_eq!(
+            reducer.offline_paint_available(),
+            case.paint,
+            "{label}: native Paint visibility"
+        );
+        assert_eq!(
+            reducer.connect_agent_available(),
+            case.connect,
+            "{label}: Connect agent visibility"
+        );
+        assert_eq!(
+            reducer.feedback_tools_visible(),
+            case.toolbar,
+            "{label}: page collaboration toolbar visibility"
+        );
+    }
+}
+
+// spec「Selected attachment is paused」：Paused 只留 Resume，不得出現 Offline Paint。
+#[test]
+fn paused_attachment_keeps_resume_without_offering_offline_paint() {
+    let reducer = DashboardReducer::new(build_snapshot(
+        1,
+        DashboardRuntimeState::Running,
+        "test-preview-session",
+        &[attachment("agent-a", CollaborationState::Paused)],
+        &[],
+        Some("agent-a"),
+        None,
+    ));
+
+    assert_eq!(reducer.selected_state_text(), "Paused");
+    assert!(reducer.action_for(DashboardControl::Resume).is_ok());
+    assert!(!reducer.offline_paint_available());
+    assert!(reducer.action_for(DashboardControl::OfflinePaint).is_err());
+}
+
+// design「原生 Offline Paint 經既有 dashboard action 與 WebviewCommand 邊界」：
+// Paint 只在 zero connected 時映射到不帶 attachment ID 的 action。
+#[test]
+fn offline_paint_control_maps_to_an_attachment_free_action() {
+    let reducer = DashboardReducer::new(build_snapshot(
+        1,
+        DashboardRuntimeState::Running,
+        "test-preview-session",
+        &[],
+        &[],
+        None,
+        None,
+    ));
+
+    assert_eq!(
+        reducer.action_for(DashboardControl::OfflinePaint).unwrap(),
+        DashboardAction::ToggleOfflinePaint
+    );
 }
 
 #[test]

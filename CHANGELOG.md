@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-01
+
+### Added
+
+- Offline Paint: the native dashboard offers non-submitting painting when no collaboration attachment is connected, gated at attachment lifecycle boundaries.
+- Multi-region painting capture plans up to eight viewport-sized regions from mark bounds and publishes them as an ordered PNG sequence.
+
+### Changed
+
+- Painting marks and element markers are anchored to document content, so they stay aligned across scrolling, resizing, and layout changes.
+
 ## [0.3.0] - 2026-07-28
 
 ### Added

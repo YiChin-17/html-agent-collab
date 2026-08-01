@@ -317,6 +317,9 @@ run_cli "paused status" status --project "$PROJECT"
 agent_event dashboard-paused visible "feedback toolbar hidden"
 [[ "$(print -r -- "$RUN_OUTPUT" | jq -r --arg id "$FIRST_ATTACHMENT_ID" '.data.attachments[] | select(.attachmentId == $id) | .collaborationState')" == "paused" ]] ||
   fail "attachment did not become paused after feedback A terminal state"
+# spec「Paused states MUST NOT expose Offline Paint」的入口在原生 dashboard：
+# eligibility 由 server 在 attachment lifecycle 邊界判斷，頁面沒有繞過的路徑。
+agent_event dashboard-paused offline-paint-hidden "paused keeps Resume only"
 
 start_wait paused-wait "$FIRST_ATTACHMENT_ID"
 kill -0 "$WAIT_PID" 2>/dev/null || fail "paused wait did not remain blocked"
@@ -356,10 +359,29 @@ print -r -- "$RUN_OUTPUT" | jq -e \
   '.data.value.clicks == "1" and .data.value.active == false and .data.value.hostCount == 1' \
   >/dev/null || fail "page was not manually interactive while detached"
 
+# spec「User opens Offline Paint」/「Reload while detached」：零連線時可開啟
+# 非提交式畫記，reload 之後回到關閉且無 marks。
+run_cli "offline-paint-open" eval --project "$PROJECT" \
+  'var o=window.__collabOverlay;var opened=o.toggleOfflinePaint();o.addMark({type:"rect",x:20,y:20,width:120,height:60});({opened:opened,open:o.offlinePaintOpen(),marks:o.marks().length,active:o.isActive()})'
+print -r -- "$RUN_OUTPUT" | jq -e \
+  '.data.value.opened == true and .data.value.open == true and .data.value.marks == 1 and .data.value.active == false' \
+  >/dev/null || fail "Offline Paint did not open with zero connected attachments"
+run_cli "offline-paint-cannot-submit" eval --project "$PROJECT" \
+  'var o=window.__collabOverlay;o.openEditor("painting", null);({editorOpen:o.editorOpen()})'
+FEEDBACK_BEFORE_OFFLINE=$(find "$PROJECT/.collab/feedback" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+
 perl -0pi -e 's/data-reload="initial"/data-reload="after-stop"/' "$ENTRY"
 wait_for_eval_value "after-stop reload" \
   'document.body.dataset.reload + ":" + window.__collabOverlay.isActive() + ":" + window.__collabOverlay.hostCount()' \
   "after-stop:false:1"
+run_cli "offline-paint-cleared-after-reload" eval --project "$PROJECT" \
+  '({open: window.__collabOverlay.offlinePaintOpen(), marks: window.__collabOverlay.marks().length})'
+print -r -- "$RUN_OUTPUT" | jq -e \
+  '.data.value.open == false and .data.value.marks == 0' >/dev/null ||
+  fail "Offline Paint survived a reload while detached"
+FEEDBACK_AFTER_OFFLINE=$(find "$PROJECT/.collab/feedback" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+[[ "$FEEDBACK_BEFORE_OFFLINE" == "$FEEDBACK_AFTER_OFFLINE" ]] ||
+  fail "offline marks created a feedback record"
 [[ -f "$SESSION_FILE" ]] || fail "session file missing after reload"
 snapshot_session "session-after-reload.json"
 record_webview_count detached-reload
@@ -388,12 +410,48 @@ run_cli "restart overlay state" eval --project "$PROJECT" \
 print -r -- "$RUN_OUTPUT" | jq -e \
   '.data.value.active == true and .data.value.hostCount == 1' >/dev/null ||
   fail "overlay did not reactivate without duplication"
+# spec「Collaboration attaches again」：attach 之後離線 Paint 必須已關閉且無 marks。
+run_cli "offline-paint-cleared-after-attach" eval --project "$PROJECT" \
+  'var o=window.__collabOverlay;({open:o.offlinePaintOpen(), marks:o.marks().length, reopened:o.toggleOfflinePaint()})'
+print -r -- "$RUN_OUTPUT" | jq -e \
+  '.data.value.open == false and .data.value.marks == 0 and .data.value.reopened == false' >/dev/null ||
+  fail "Offline Paint was still available after an attachment became active"
 record_webview_count connected
 snapshot_process_tree connected
 
+# spec「Visual annotations remain anchored to document content」：長頁面捲動後
+# mark geometry 不得被改寫，overlap 仍指向原本的 #scroll-anchor。
+run_cli "document-anchored painting" eval --project "$PROJECT" \
+  'var o=window.__collabOverlay;o.clearMarks();window.scrollTo(0,0);var r=document.querySelector("#scroll-anchor").getBoundingClientRect();o.addMark({type:"rect",x:r.left+window.scrollX+8,y:r.top+window.scrollY+8,width:r.width-16,height:r.height-16});var before=JSON.stringify(o.marks());window.scrollTo(0,document.documentElement.scrollHeight);var after=JSON.stringify(o.marks());var topOverlap=o.computeOverlaps()[0];window.scrollTo(0,0);({geometryStable: before===after, anchoredSelector: topOverlap?topOverlap.selector:null})'
+print -r -- "$RUN_OUTPUT" | jq -e \
+  '.data.value.geometryStable == true and .data.value.anchoredSelector == "#scroll-anchor"' >/dev/null ||
+  fail "painting geometry did not stay anchored to document content after scrolling"
+run_cli "clear anchored painting" eval --project "$PROJECT" \
+  'window.__collabOverlay.clearMarks(); true'
+
+# spec「Painting capture regions are geometry-based and bounded」：以 spec 的
+# Example 值直接驗證 planner，分組只看 geometry、超過 8 個 region 不得送出。
+run_cli "capture-plan-examples" eval --project "$PROJECT" \
+  'var o=window.__collabOverlay;var v={width:1200,height:800};var d={width:1200,height:6000};var mk=function(a,b){return{x:100,y:a,width:200,height:b-a}};var fits=o.planCaptureRegions([mk(900,1000),mk(1200,1300)],v,d).length;var split=o.planCaptureRegions([mk(900,1000),mk(2200,2300)],v,d).length;var overlap=o.planCaptureRegions([mk(900,1100),mk(1050,1250)],v,d).length;var tiles=o.planCaptureRegions([{x:0,y:0,width:200,height:2400}],v,d);var ordered=o.planCaptureRegions([mk(3000,3100),mk(200,300)],v,d);({fits:fits,split:split,overlap:overlap,tiles:tiles.length,tilesInDocument:tiles.every(function(r){return r.x>=0&&r.y>=0&&r.x+r.width<=d.width&&r.y+r.height<=d.height}),orderedTop:ordered[0].y<ordered[1].y})'
+print -r -- "$RUN_OUTPUT" | jq -e \
+  '.data.value.fits == 1 and .data.value.split == 2 and .data.value.overlap == 1 and .data.value.tiles == 3 and .data.value.tilesInDocument == true and .data.value.orderedTop == true' >/dev/null ||
+  fail "capture planner did not group marks by geometry"
+
+FEEDBACK_BEFORE_LIMIT=$(find "$PROJECT/.collab/feedback" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+run_cli "capture-plan-limit" eval --project "$PROJECT" \
+  'var o=window.__collabOverlay;o.clearMarks();for(var i=0;i<9;i++){o.addMark({type:"rect",x:10,y:i*3000+10,width:100,height:100})}var plan=o.planCaptureRegions(o.marks().map(function(m){return{x:m.x,y:m.y,width:m.width,height:m.height}}),{width:window.innerWidth,height:window.innerHeight},{width:document.documentElement.scrollWidth,height:document.documentElement.scrollHeight});o.submitPainting("too many regions");({regions:plan.length,marksKept:o.marks().length})'
+print -r -- "$RUN_OUTPUT" | jq -e \
+  '.data.value.regions == 9 and .data.value.marksKept == 9' >/dev/null ||
+  fail "painting exceeding the capture region limit must keep its draft"
+FEEDBACK_AFTER_LIMIT=$(find "$PROJECT/.collab/feedback" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+[[ "$FEEDBACK_BEFORE_LIMIT" == "$FEEDBACK_AFTER_LIMIT" ]] ||
+  fail "an over-limit painting created a feedback record"
+run_cli "clear capture-plan-limit marks" eval --project "$PROJECT" \
+  'window.__collabOverlay.clearMarks(); true'
+
 start_wait painting-wait "$SECOND_ATTACHMENT_ID"
 run_cli "submitPainting" eval --project "$PROJECT" \
-  'var overlay=window.__collabOverlay;overlay.clearMarks();var r=document.querySelector("#paint-target").getBoundingClientRect();overlay.addMark({type:"rect",x:r.x+8,y:r.y+8,width:r.width-16,height:r.height-16});overlay.addMark({type:"label",x:r.x+24,y:r.y+38,text:"Update CTA"});overlay.submitPainting("Change #cta to Painting feedback resolved.").then(function(){return true})'
+  'var overlay=window.__collabOverlay;overlay.clearMarks();window.scrollTo(0,0);var r=document.querySelector("#paint-target").getBoundingClientRect();var x=r.left+window.scrollX;var y=r.top+window.scrollY;overlay.addMark({type:"rect",x:x+8,y:y+8,width:r.width-16,height:r.height-16});overlay.addMark({type:"label",x:x+24,y:y+38,text:"Update CTA"});overlay.submitPainting("Change #cta to Painting feedback resolved.").then(function(){return true})'
 finish_wait painting-wait
 PAINTING_FEEDBACK_ID=$(jq -er '.data.item.id' "$WAIT_OUTPUT")
 run_cli "painting acknowledged" feedback set-state --project "$PROJECT" \

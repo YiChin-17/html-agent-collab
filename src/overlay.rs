@@ -267,7 +267,8 @@ mod tests {
             "function clampCurrentToolbarPosition()",
             "if (!ui.toolbar || !ui.toolbar.style.left) return",
             "setToolbarPosition(event.clientX - state.dragOffsetX, event.clientY - state.dragOffsetY)",
-            "if (state.active) clampCurrentToolbarPosition()",
+            // toolbar 在 collaboration 或離線 Paint 任一可用時都要重新 clamp。
+            "if (paintingAvailable()) clampCurrentToolbarPosition()",
             r#"window.addEventListener("resize", clampCurrentToolbarPosition)"#,
         ] {
             assert!(
@@ -362,6 +363,153 @@ mod tests {
         }
         assert!(!OVERLAY_JS.contains("alert("));
         assert!(!OVERLAY_JS.contains("confirm("));
+    }
+
+    // spec「Visual annotations remain anchored to document content」+ design
+    // 「Paint geometry 使用 document-space CSS coordinates」：pointer input、hit
+    // testing、move 一律以 document-space CSS pixels 記錄，不得直接使用 viewport 座標。
+    #[test]
+    fn painting_pointer_input_uses_document_space_coordinates() {
+        for contract in [
+            "function documentPoint(event)",
+            "event.clientX + window.scrollX",
+            "event.clientY + window.scrollY",
+            "var point = documentPoint(event);",
+            "hitMarkIndex(point.x, point.y)",
+            "point.x - gesture.startX",
+            "point.y - gesture.startY",
+        ] {
+            assert!(
+                OVERLAY_JS.contains(contract),
+                "missing document-space pointer contract: {contract}"
+            );
+        }
+        // viewport 座標不得直接寫進 mark geometry。
+        for forbidden in [
+            "var x = event.clientX;",
+            "var y = event.clientY;",
+            "event.clientX - gesture.startX",
+            "event.clientX !== gesture.startX",
+        ] {
+            assert!(
+                !OVERLAY_JS.contains(forbidden),
+                "paint geometry still reads viewport coordinates: {forbidden}"
+            );
+        }
+    }
+
+    // design：fixed SVG layer 只更新 viewBox，scroll/resize 以單一
+    // requestAnimationFrame coalesce，永不改寫已保存的 mark geometry。
+    #[test]
+    fn paint_layer_tracks_scroll_through_one_animation_frame() {
+        for contract in [
+            "function syncPaintViewport()",
+            "function scheduleViewportSync()",
+            "state.viewportSyncHandle",
+            "window.requestAnimationFrame(syncPaintViewport)",
+            r#"ui.paintLayer.setAttribute("viewBox""#,
+            r#"window.scrollX + " " + window.scrollY + " " + window.innerWidth + " " + window.innerHeight"#,
+            r#"window.addEventListener("scroll", scheduleViewportSync"#,
+            r#"window.addEventListener("resize", scheduleViewportSync)"#,
+        ] {
+            assert!(
+                OVERLAY_JS.contains(contract),
+                "missing coalesced viewport sync contract: {contract}"
+            );
+        }
+    }
+
+    // spec「Compute overlap after scrolling」：element rect 與 mark bounds 在同一
+    // document-space 座標系比較，捲動後仍指向原本的 element。
+    #[test]
+    fn element_rects_and_overlaps_are_document_space() {
+        for contract in [
+            "function documentRect(el)",
+            "rect.left + window.scrollX",
+            "rect.top + window.scrollY",
+            "rect: documentRect(el)",
+            "var box = documentRect(el);",
+            "intersectionArea(box, boxes[j]) / area",
+        ] {
+            assert!(
+                OVERLAY_JS.contains(contract),
+                "missing document-space overlap contract: {contract}"
+            );
+        }
+    }
+
+    // design：editable SVG 以 document dimensions 當 viewBox，selection indicator
+    // 這類 fixed 元素則在渲染時才換算回 viewport。
+    #[test]
+    fn serialized_svg_and_selection_indicator_use_document_geometry() {
+        for contract in [
+            "function documentSize()",
+            r#"clone.setAttribute("viewBox", "0 0 " + size.width + " " + size.height)"#,
+            "box.x - 4 - window.scrollX",
+            "box.y - 4 - window.scrollY",
+        ] {
+            assert!(
+                OVERLAY_JS.contains(contract),
+                "missing document-space serialization contract: {contract}"
+            );
+        }
+    }
+
+    // spec「Element marker follows its target」/「Marker target cannot be resolved」：
+    // marker 保存可重新解析的 identity，scroll/resize/snapshot 都重算位置；
+    // 解析不到 target 就不放 marker，且較舊 revision 仍被忽略。
+    #[test]
+    fn element_markers_relayout_from_their_resolved_target() {
+        for contract in [
+            "state.markerItems",
+            "function layoutMarkers()",
+            r#"return item.state !== "resolved";"#,
+            "var el = resolveTarget(item.element);",
+            "if (!el) return;",
+            "layoutMarkers();",
+            "snapshot.revision < state.lastMarkerRevision",
+        ] {
+            assert!(
+                OVERLAY_JS.contains(contract),
+                "missing marker relayout contract: {contract}"
+            );
+        }
+        // 舊版只在套用 snapshot 時算一次座標，不得殘留。
+        assert!(
+            !OVERLAY_JS.contains(r#"if (item.state === "resolved") return;"#),
+            "marker placement still happens only once per snapshot"
+        );
+    }
+
+    // spec「Painting capture regions are geometry-based and bounded」+ design
+    // 「Capture planner 依 mark bounds 分組而非 scroll history」：分組只看 document-space
+    // bounds，排序固定為 top → left → 原始 index，超過上限時保留 draft 且不送 POST。
+    #[test]
+    fn capture_planner_groups_by_geometry_and_stays_bounded() {
+        for contract in [
+            "var CAPTURE_REGION_LIMIT = 8",
+            "Painting spans more than 8 capture regions; split it into smaller feedback.",
+            "function planCaptureRegions(bounds, viewport, docSize)",
+            "function regionForBounds(box, width, height, docSize)",
+            "function tileBounds(box, width, height, docSize)",
+            "a.box.y - b.box.y || a.box.x - b.box.x || a.index - b.index",
+            "if (regions.length > CAPTURE_REGION_LIMIT)",
+            "if (!regions.length)",
+            "body.viewport.captureRegions = regions;",
+            "documentWidth: size.width",
+            "documentHeight: size.height",
+            "planCaptureRegions: planCaptureRegions",
+        ] {
+            assert!(
+                OVERLAY_JS.contains(contract),
+                "missing capture planner contract: {contract}"
+            );
+        }
+        // 分組不得依賴 scroll 位置或 scroll 歷史。
+        assert!(
+            !OVERLAY_JS.contains("scrollHistory"),
+            "capture plan must not depend on scroll history"
+        );
     }
 
     #[test]

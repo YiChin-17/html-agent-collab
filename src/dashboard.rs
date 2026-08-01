@@ -203,6 +203,7 @@ pub enum DashboardControl {
     Resume,
     Stop,
     Close,
+    OfflinePaint,
 }
 
 #[derive(Debug, Clone)]
@@ -255,6 +256,13 @@ impl DashboardReducer {
             .any(|attachment| attachment.collaboration_state == CollaborationState::Active)
     }
 
+    /// spec「Persistent native collaboration dashboard」：Paint 只在 runtime running
+    /// 且零個 connected attachment 時出現（`build_snapshot` 已濾掉未連線的 attachment）。
+    pub fn offline_paint_available(&self) -> bool {
+        self.snapshot.runtime_state == DashboardRuntimeState::Running
+            && self.snapshot.attachments.is_empty()
+    }
+
     pub fn connect_agent_available(&self) -> bool {
         self.snapshot.runtime_state == DashboardRuntimeState::Running
             && self.snapshot.attachments.is_empty()
@@ -295,6 +303,12 @@ impl DashboardReducer {
     ) -> Result<DashboardAction, DashboardActionError> {
         if control == DashboardControl::Close {
             return Ok(DashboardAction::Close);
+        }
+        if control == DashboardControl::OfflinePaint {
+            return self
+                .offline_paint_available()
+                .then_some(DashboardAction::ToggleOfflinePaint)
+                .ok_or(DashboardActionError::OfflinePaintUnavailable);
         }
         let selected = self
             .snapshot
@@ -437,6 +451,9 @@ fn action_matches(action: &DashboardAction, snapshot: &DashboardSnapshot) -> boo
         }
         DashboardAction::Stop { attachment_id } => state(attachment_id).is_none(),
         DashboardAction::Close => snapshot.runtime_state == DashboardRuntimeState::Closed,
+        // 離線 Paint 不改變任何 attachment 或 feedback lifecycle 狀態，
+        // 因此 server 回報成功即完成，沒有要等待的 snapshot 變化。
+        DashboardAction::ToggleOfflinePaint => true,
     }
 }
 
@@ -498,6 +515,7 @@ mod macos {
         resume: usize,
         stop: usize,
         connect: usize,
+        offline_paint: usize,
         info_button: usize,
         info_popover: usize,
         info_counts_label: usize,
@@ -560,6 +578,11 @@ mod macos {
             #[unsafe(method(stop:))]
             fn stop(&self, _sender: &NSButton) {
                 self.submit_control(DashboardControl::Stop);
+            }
+
+            #[unsafe(method(offlinePaint:))]
+            fn offline_paint(&self, _sender: &NSButton) {
+                self.submit_control(DashboardControl::OfflinePaint);
             }
 
             #[unsafe(method(toggleDraft:))]
@@ -923,6 +946,16 @@ mod macos {
                 mtm,
             )
         };
+        // spec「Preview has no connected agent」：Paint 與 Connect agent、Close preview 同列。
+        let offline_paint = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str("Paint"),
+                Some(&controller),
+                Some(sel!(offlinePaint:)),
+                mtm,
+            )
+        };
+        offline_paint.setAccessibilityLabel(Some(&NSString::from_str("Offline Paint")));
 
         // Info button — opens feedback popover
         let info_button = unsafe {
@@ -1003,7 +1036,7 @@ mod macos {
                 mtm,
             )
         };
-        let views: [&NSView; 10] = [
+        let views: [&NSView; 11] = [
             &state_label,
             &error_label,
             &selector,
@@ -1012,6 +1045,7 @@ mod macos {
             &pause,
             &resume,
             &stop,
+            &offline_paint,
             &connect,
             &close,
         ];
@@ -1038,6 +1072,7 @@ mod macos {
             resume: Retained::as_ptr(&resume) as usize,
             stop: Retained::as_ptr(&stop) as usize,
             connect: Retained::as_ptr(&connect) as usize,
+            offline_paint: Retained::as_ptr(&offline_paint) as usize,
             info_button: Retained::as_ptr(&info_button) as usize,
             info_popover: Retained::as_ptr(&info_popover) as usize,
             info_counts_label: Retained::as_ptr(&info_counts_label) as usize,
@@ -1094,6 +1129,7 @@ mod macos {
         let resume = unsafe { (pointers.resume as *mut NSButton).as_ref() };
         let stop = unsafe { (pointers.stop as *mut NSButton).as_ref() };
         let connect = unsafe { (pointers.connect as *mut NSButton).as_ref() };
+        let offline_paint = unsafe { (pointers.offline_paint as *mut NSButton).as_ref() };
         let info_button = unsafe { (pointers.info_button as *mut NSButton).as_ref() };
         let draft = unsafe { (pointers.draft as *mut NSButton).as_ref() };
         let info_counts_label =
@@ -1111,6 +1147,7 @@ mod macos {
             Some(resume),
             Some(stop),
             Some(connect),
+            Some(offline_paint),
             Some(info_button),
             Some(draft),
             Some(info_counts_label),
@@ -1126,6 +1163,7 @@ mod macos {
             resume,
             stop,
             connect,
+            offline_paint,
             info_button,
             draft,
             info_counts_label,
@@ -1265,6 +1303,11 @@ mod macos {
             && snapshot.attachments.is_empty();
         connect.setHidden(!connect_available);
         connect.setEnabled(!pending);
+        // 與 DashboardReducer::offline_paint_available 同一條件：Active、pause-requested、
+        // Paused 或還有其他 connected attachment 時都不顯示。
+        let offline_paint_available = connect_available;
+        offline_paint.setHidden(!offline_paint_available);
+        offline_paint.setEnabled(offline_paint_available && !pending);
 
         // Update connect popover content
         connect_preview_id.setStringValue(&NSString::from_str(&format!(

@@ -22,6 +22,11 @@ pub enum WebviewCommand {
         snapshot: crate::core::FeedbackMarkerSnapshot,
         respond: oneshot::Sender<Result<(), CommandError>>,
     },
+    /// spec「Offline Paint is non-submitting visual markup」：只切換 overlay 的
+    /// 離線畫記狀態，不觸碰 collaboration availability 或任何 feedback artifact。
+    ToggleOfflinePaint {
+        respond: oneshot::Sender<Result<(), CommandError>>,
+    },
     Reload {
         respond: oneshot::Sender<Result<(), CommandError>>,
     },
@@ -32,6 +37,14 @@ pub enum WebviewCommand {
     Snapshot {
         output_path: PathBuf,
         respond: oneshot::Sender<Result<PathBuf, CommandError>>,
+    },
+    /// design「Multi-region snapshot 在單一 WebviewCommand 內恢復 UI 與 scroll」：
+    /// 1–8 個 ordered regions 與對應 output paths，回傳成功發布的 PNG paths（同序）。
+    /// 成功或失敗都在同一個完成點恢復原本的 scroll 與 overlay UI 狀態。
+    CapturePainting {
+        regions: Vec<crate::feedback::CaptureRegion>,
+        output_paths: Vec<PathBuf>,
+        respond: oneshot::Sender<Result<Vec<PathBuf>, CommandError>>,
     },
 }
 
@@ -156,6 +169,9 @@ fn execute(window: &tauri::WebviewWindow<tauri::Wry>, command: WebviewCommand) {
             WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
                 let _ = respond.send(Err(CommandError::Internal("unsupported platform".into())));
             }
+            WebviewCommand::ToggleOfflinePaint { respond } => {
+                let _ = respond.send(Err(CommandError::Internal("unsupported platform".into())));
+            }
             WebviewCommand::Reload { respond } => {
                 let _ = respond.send(Err(CommandError::Internal("unsupported platform".into())));
             }
@@ -163,6 +179,9 @@ fn execute(window: &tauri::WebviewWindow<tauri::Wry>, command: WebviewCommand) {
                 let _ = respond.send(Err(CommandError::Internal("unsupported platform".into())));
             }
             WebviewCommand::Snapshot { respond, .. } => {
+                let _ = respond.send(Err(CommandError::Internal("unsupported platform".into())));
+            }
+            WebviewCommand::CapturePainting { respond, .. } => {
                 let _ = respond.send(Err(CommandError::Internal("unsupported platform".into())));
             }
         }
@@ -221,6 +240,30 @@ mod macos {
                     let script = NSString::from_str(&format!(
                         "window.__collabOverlay && window.__collabOverlay.syncFeedbackMarkers({payload});"
                     ));
+                    let respond = Mutex::new(Some(respond));
+                    let handler =
+                        RcBlock::new(move |_value: *mut AnyObject, error: *mut NSError| {
+                            let Some(respond) = respond.lock().unwrap().take() else {
+                                return;
+                            };
+                            let outcome = unsafe { error.as_ref() }.map_or(Ok(()), |error| {
+                                Err(CommandError::JavascriptError(
+                                    error.localizedDescription().to_string(),
+                                ))
+                            });
+                            let _ = respond.send(outcome);
+                        });
+                    unsafe {
+                        webview.evaluateJavaScript_completionHandler(&script, Some(&handler));
+                    }
+                })
+            }
+            WebviewCommand::ToggleOfflinePaint { respond } => {
+                window.with_webview(move |platform| {
+                    let webview = unsafe { &*platform.inner().cast::<WKWebView>() };
+                    let script = NSString::from_str(
+                        "window.__collabOverlay && window.__collabOverlay.toggleOfflinePaint();",
+                    );
                     let respond = Mutex::new(Some(respond));
                     let handler =
                         RcBlock::new(move |_value: *mut AnyObject, error: *mut NSError| {
@@ -314,11 +357,172 @@ mod macos {
                     }
                 })
             }
+            WebviewCommand::CapturePainting {
+                regions,
+                output_paths,
+                respond,
+            } => {
+                begin_capture(CaptureState {
+                    window: window.clone(),
+                    regions,
+                    output_paths,
+                    written: Vec::new(),
+                    index: 0,
+                    respond,
+                });
+                Ok(())
+            }
         };
         if let Err(e) = result {
             // with_webview 本身失敗（視窗已消失等）；oneshot sender 已被移入
             // closure，無法補送——caller 端以 oneshot RecvError 收到 internal error。
             eprintln!("webview command dispatch failed: {e}");
+        }
+    }
+
+    /// 一次 multi-region painting capture 的完整狀態。每一步都是一次
+    /// `with_webview` dispatch ＋ 一個 WebKit completion handler，因此不需要跨
+    /// callback 持有 WKWebView pointer；unsafe pointer 仍不離開本模組。
+    struct CaptureState {
+        window: tauri::WebviewWindow<tauri::Wry>,
+        regions: Vec<crate::feedback::CaptureRegion>,
+        output_paths: Vec<std::path::PathBuf>,
+        written: Vec<std::path::PathBuf>,
+        index: usize,
+        respond: super::oneshot::Sender<Result<Vec<std::path::PathBuf>, CommandError>>,
+    }
+
+    /// 在 main thread 執行一段 script，完成後帶著 state 與可能的錯誤訊息續行。
+    fn eval_step(state: CaptureState, script: String, next: fn(CaptureState, Option<String>)) {
+        let window = state.window.clone();
+        let dispatched = window.with_webview(move |platform| {
+            let webview = unsafe { &*platform.inner().cast::<WKWebView>() };
+            let ns_script = NSString::from_str(&script);
+            let slot = Mutex::new(Some(state));
+            let handler = RcBlock::new(move |_value: *mut AnyObject, error: *mut NSError| {
+                let Some(state) = slot.lock().unwrap().take() else {
+                    return;
+                };
+                let message =
+                    unsafe { error.as_ref() }.map(|error| error.localizedDescription().to_string());
+                next(state, message);
+            });
+            unsafe {
+                webview.evaluateJavaScript_completionHandler(&ns_script, Some(&handler));
+            }
+        });
+        if let Err(error) = dispatched {
+            // state（含 responder）已移入 closure；caller 端以 oneshot RecvError 收到 internal error。
+            eprintln!("painting capture step dispatch failed: {error}");
+        }
+    }
+
+    fn begin_capture(state: CaptureState) {
+        eval_step(
+            state,
+            "window.__collabOverlay && window.__collabOverlay.beginCapture();".into(),
+            |state, error| match error {
+                Some(message) => finish_capture(
+                    state,
+                    Err(CommandError::SnapshotFailed(format!(
+                        "cannot prepare the preview for capture: {message}"
+                    ))),
+                ),
+                None => capture_region(state),
+            },
+        );
+    }
+
+    fn capture_region(state: CaptureState) {
+        if state.index >= state.regions.len() {
+            let written = state.written.clone();
+            finish_capture(state, Ok(written));
+            return;
+        }
+        let region = state.regions[state.index];
+        let script = format!(
+            "window.__collabOverlay && window.__collabOverlay.moveToCaptureRegion({}, {});",
+            region.x, region.y
+        );
+        eval_step(state, script, |state, error| match error {
+            Some(message) => finish_capture(
+                state,
+                Err(CommandError::SnapshotFailed(format!(
+                    "cannot move to the capture region: {message}"
+                ))),
+            ),
+            None => snapshot_region(state),
+        });
+    }
+
+    fn snapshot_region(state: CaptureState) {
+        let output_path = state.output_paths[state.index].clone();
+        let window = state.window.clone();
+        let dispatched = window.with_webview(move |platform| {
+            let webview = unsafe { &*platform.inner().cast::<WKWebView>() };
+            let slot = Mutex::new(Some(state));
+            let handler = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+                let Some(mut state) = slot.lock().unwrap().take() else {
+                    return;
+                };
+                let outcome = if let Some(error) = unsafe { error.as_ref() } {
+                    Err(CommandError::SnapshotFailed(
+                        error.localizedDescription().to_string(),
+                    ))
+                } else if let Some(image) = unsafe { image.as_ref() } {
+                    write_png(image, &output_path)
+                } else {
+                    Err(CommandError::SnapshotFailed(
+                        "WebKit returned neither image nor error".into(),
+                    ))
+                };
+                match outcome {
+                    Ok(path) => {
+                        state.written.push(path);
+                        state.index += 1;
+                        capture_region(state);
+                    }
+                    Err(error) => finish_capture(state, Err(error)),
+                }
+            });
+            unsafe {
+                webview.takeSnapshotWithConfiguration_completionHandler(None, &handler);
+            }
+        });
+        if let Err(error) = dispatched {
+            eprintln!("painting capture snapshot dispatch failed: {error}");
+        }
+    }
+
+    /// 成功與失敗共用的唯一完成點：恢復原本 scroll 與 overlay UI 後才回覆。
+    fn finish_capture(state: CaptureState, outcome: Result<Vec<std::path::PathBuf>, CommandError>) {
+        let window = state.window.clone();
+        let respond = state.respond;
+        let dispatched = window.with_webview(move |platform| {
+            let webview = unsafe { &*platform.inner().cast::<WKWebView>() };
+            let script = NSString::from_str(
+                "window.__collabOverlay && window.__collabOverlay.endCapture();",
+            );
+            let slot = Mutex::new(Some((respond, outcome)));
+            let handler = RcBlock::new(move |_value: *mut AnyObject, error: *mut NSError| {
+                let Some((respond, outcome)) = slot.lock().unwrap().take() else {
+                    return;
+                };
+                let restored = match (unsafe { error.as_ref() }, outcome) {
+                    (Some(error), Ok(_)) => Err(CommandError::SnapshotFailed(format!(
+                        "cannot restore the preview after capture: {}",
+                        error.localizedDescription()
+                    ))),
+                    (_, outcome) => outcome,
+                };
+                let _ = respond.send(restored);
+            });
+            unsafe {
+                webview.evaluateJavaScript_completionHandler(&script, Some(&handler));
+            }
+        });
+        if let Err(error) = dispatched {
+            eprintln!("painting capture restoration dispatch failed: {error}");
         }
     }
 
@@ -478,6 +682,52 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&output).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    /// design「Multi-region snapshot 在單一 WebviewCommand 內恢復 UI 與 scroll」：
+    /// capture 順序（begin → move → snapshot → …→ end）、成功與失敗共用同一個完成點，
+    /// 且 completion handler 只取用一次 responder；unsafe pointer 不跨 callback 保留。
+    #[test]
+    fn painting_capture_has_one_ordered_sequence_and_one_completion_point() {
+        // 只掃描實作區段，避免本測試的字串常數自我命中。
+        let source = include_str!("webview.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("webview source has an implementation section");
+
+        for contract in [
+            "fn begin_capture(state: CaptureState)",
+            "fn capture_region(state: CaptureState)",
+            "fn snapshot_region(state: CaptureState)",
+            "fn finish_capture(state: CaptureState",
+            "window.__collabOverlay.beginCapture();",
+            "window.__collabOverlay.moveToCaptureRegion({}, {});",
+            "window.__collabOverlay.endCapture();",
+            "state.index += 1;",
+            "capture_region(state);",
+            // 每條 completion path 都經過 finish_capture 才回覆。
+            "Err(error) => finish_capture(state, Err(error)),",
+            "cannot prepare the preview for capture",
+            "cannot move to the capture region",
+            "cannot restore the preview after capture",
+            // responder 只被取出一次；重複觸發的 callback 直接返回。
+            "let Some((respond, outcome)) = slot.lock().unwrap().take() else {",
+        ] {
+            assert!(
+                source.contains(contract),
+                "missing painting capture contract: {contract}"
+            );
+        }
+        // 每一步都重新透過 with_webview 取得 WKWebView，不跨 callback 持有 pointer。
+        assert!(
+            !source.contains("Retained::retain("),
+            "painting capture must not retain the WebView pointer across callbacks"
+        );
+        assert_eq!(
+            source.matches("respond.send(restored)").count(),
+            1,
+            "painting capture must reply from exactly one completion point"
         );
     }
 }

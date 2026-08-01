@@ -33,6 +33,14 @@ async fn start_preview(root: &Path) -> (RunningServer, SessionFile) {
                 collab::webview::WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
                     let _ = respond.send(Ok(()));
                 }
+                collab::webview::WebviewCommand::ToggleOfflinePaint { respond } => {
+                    let _ = respond.send(Ok(()));
+                }
+                collab::webview::WebviewCommand::CapturePainting { respond, .. } => {
+                    let _ = respond.send(Err(collab::webview::CommandError::SnapshotFailed(
+                        "painting capture is not used by wait tests".into(),
+                    )));
+                }
                 collab::webview::WebviewCommand::Reload { respond } => {
                     let _ = respond.send(Ok(()));
                 }

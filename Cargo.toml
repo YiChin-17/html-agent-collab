@@ -1,6 +1,6 @@
 [package]
 name = "collab"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "macOS preview collaboration tool for agent workflows"
 license = "MIT OR Apache-2.0"

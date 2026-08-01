@@ -95,10 +95,19 @@ pub struct DashboardSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum DashboardAction {
-    Pause { attachment_id: String },
-    Resume { attachment_id: String },
-    Stop { attachment_id: String },
+    Pause {
+        attachment_id: String,
+    },
+    Resume {
+        attachment_id: String,
+    },
+    Stop {
+        attachment_id: String,
+    },
     Close,
+    /// 沒有 attachment ID：eligibility 完全由 runtime running 加上零個
+    /// connected attachment 決定，由 server 在 attachment lifecycle 邊界內重新確認。
+    ToggleOfflinePaint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +116,7 @@ pub enum DashboardActionError {
     SelectionRequired,
     AttachmentNotFound,
     AttachmentInactive,
+    OfflinePaintUnavailable,
     Storage(String),
     Internal(String),
 }
@@ -118,6 +128,7 @@ impl DashboardActionError {
             Self::SelectionRequired => "selection-required",
             Self::AttachmentNotFound => "attachment-not-found",
             Self::AttachmentInactive => "attachment-inactive",
+            Self::OfflinePaintUnavailable => "offline-paint-unavailable",
             Self::Storage(_) => "storage-error",
             Self::Internal(_) => "internal-error",
         }
@@ -129,6 +140,9 @@ impl DashboardActionError {
             Self::SelectionRequired => "Select an attachment first".into(),
             Self::AttachmentNotFound => "The selected attachment no longer exists".into(),
             Self::AttachmentInactive => "The selected attachment is inactive".into(),
+            Self::OfflinePaintUnavailable => {
+                "Offline Paint is available only while no agent is connected".into()
+            }
             Self::Storage(message) | Self::Internal(message) => message.clone(),
         }
     }

@@ -21,6 +21,7 @@ async fn start_server(
             match command {
                 WebviewCommand::SetCollaborationActive { respond, .. }
                 | WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | WebviewCommand::ToggleOfflinePaint { respond }
                 | WebviewCommand::Reload { respond } => {
                     let _ = respond.send(Ok(()));
                 }
@@ -30,6 +31,11 @@ async fn start_server(
                 WebviewCommand::Snapshot { respond, .. } => {
                     let _ = respond.send(Err(CommandError::SnapshotFailed(
                         "snapshot not configured for this test".into(),
+                    )));
+                }
+                WebviewCommand::CapturePainting { respond, .. } => {
+                    let _ = respond.send(Err(CommandError::SnapshotFailed(
+                        "painting capture is not configured for this test".into(),
                     )));
                 }
             }
@@ -690,7 +696,11 @@ async fn paused_collaboration_rejects_overlay_without_persisting_artifacts() {
         "kind": "painting",
         "text": "feedback B",
         "pageUrl": "http://127.0.0.1/",
-        "viewport": {"width": 800, "height": 600, "scrollX": 0, "scrollY": 0},
+        "viewport": {
+            "width": 800, "height": 600, "scrollX": 0, "scrollY": 0,
+            "documentWidth": 800, "documentHeight": 1200,
+            "captureRegions": [{"x": 0, "y": 0, "width": 800, "height": 600}],
+        },
         "elements": [],
         "marks": [{"type": "rect", "x": 1, "y": 1, "width": 10, "height": 10}],
         "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
@@ -988,15 +998,19 @@ async fn painting_feedback_persists_png_and_svg_attachments() {
         while let Some(command) = commands.recv().await {
             match command {
                 WebviewCommand::SetCollaborationActive { respond, .. }
-                | WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
+                | WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | WebviewCommand::ToggleOfflinePaint { respond } => {
                     let _ = respond.send(Ok(()));
                 }
-                WebviewCommand::Snapshot {
-                    output_path,
+                WebviewCommand::CapturePainting {
+                    output_paths,
                     respond,
+                    ..
                 } => {
-                    std::fs::write(&output_path, b"\x89PNG-stub").unwrap();
-                    let _ = respond.send(Ok(output_path));
+                    for path in &output_paths {
+                        std::fs::write(path, b"\x89PNG-stub").unwrap();
+                    }
+                    let _ = respond.send(Ok(output_paths));
                 }
                 _ => {}
             }
@@ -1008,7 +1022,11 @@ async fn painting_feedback_persists_png_and_svg_attachments() {
         "kind": "painting",
         "text": "Move these cards upward",
         "pageUrl": "http://127.0.0.1/",
-        "viewport": {"width": 1200, "height": 800, "scrollX": 0, "scrollY": 0},
+        "viewport": {
+            "width": 1200, "height": 800, "scrollX": 0, "scrollY": 0,
+            "documentWidth": 1200, "documentHeight": 4000,
+            "captureRegions": [{"x": 0, "y": 0, "width": 1200, "height": 800}],
+        },
         "elements": [
             {"selector": "#card-a", "overlapRatio": 0.82},
             {"selector": "#section", "overlapRatio": 0.64},
@@ -1063,22 +1081,23 @@ async fn painting_publish_failure_removes_unpublished_artifacts() {
             panic!("expected collaboration-active command");
         };
         respond.send(Ok(())).unwrap();
-        let WebviewCommand::Snapshot {
-            output_path,
+        let WebviewCommand::CapturePainting {
+            output_paths,
             respond,
+            ..
         } = commands.recv().await.unwrap()
         else {
-            panic!("expected snapshot command");
+            panic!("expected capture painting command");
         };
-        std::fs::write(&output_path, b"\x89PNG-stub").unwrap();
-        let id = output_path
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        std::fs::create_dir_all(output_path.with_extension("json")).unwrap();
+        for path in &output_paths {
+            std::fs::write(path, b"\x89PNG-stub").unwrap();
+        }
+        let id = record_id_from_png(&output_paths[0]);
+        // record 寫入失敗：以目錄佔用 JSON 路徑。
+        let dir = output_paths[0].parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(dir.join(format!("{id}.json"))).unwrap();
         *worker_id.lock().unwrap() = Some(id);
-        let _ = respond.send(Ok(output_path));
+        let _ = respond.send(Ok(output_paths));
     });
     attach_agent(running.port, "test-token", "codex").await;
 
@@ -1086,7 +1105,14 @@ async fn painting_publish_failure_removes_unpublished_artifacts() {
         "kind": "painting",
         "text": "cleanup this failure",
         "pageUrl": "http://127.0.0.1/",
-        "viewport": {"width": 800, "height": 600, "scrollX": 0, "scrollY": 0},
+        "viewport": {
+            "width": 800, "height": 600, "scrollX": 0, "scrollY": 0,
+            "documentWidth": 800, "documentHeight": 1800,
+            "captureRegions": [
+                {"x": 0, "y": 0, "width": 800, "height": 600},
+                {"x": 0, "y": 1200, "width": 800, "height": 600},
+            ],
+        },
         "elements": [],
         "marks": [{"type": "line", "x": 1, "y": 2}],
         "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
@@ -1097,9 +1123,220 @@ async fn painting_publish_failure_removes_unpublished_artifacts() {
 
     assert_eq!(status, 500);
     let id = observed_id.lock().unwrap().clone().unwrap();
-    assert!(!feedback_dir.join(format!("{id}.png")).exists());
+    // 本次建立的每一張 PNG 與 SVG 都必須被清掉，且不得留下 unpublished record。
+    assert!(!feedback_dir.join(format!("{id}-0.png")).exists());
+    assert!(!feedback_dir.join(format!("{id}-1.png")).exists());
     assert!(!feedback_dir.join(format!("{id}.svg")).exists());
     assert!(!feedback_dir.join(format!("{id}.json.tmp")).exists());
+}
+
+fn record_id_from_png(path: &std::path::Path) -> String {
+    let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+    stem.rsplit_once('-')
+        .expect("png attachments are named <id>-<index>.png")
+        .0
+        .to_string()
+}
+
+/// spec「Multiple capture regions are published」：一筆 feedback 依序帶三張 PNG，
+/// 最後才是 editable SVG，`viewport.captureRegions[n]` 與 `attachments[n]` 逐一對應。
+#[tokio::test]
+async fn painting_publishes_ordered_multi_region_attachments() {
+    use collab::webview::WebviewCommand;
+
+    let root = temp_root("painting-multi-region");
+    let (running, mut commands) = start_server_manual(root.clone(), "test-token".into()).await;
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<f64>::new()));
+    let worker = observed.clone();
+    tokio::spawn(async move {
+        while let Some(command) = commands.recv().await {
+            match command {
+                WebviewCommand::SetCollaborationActive { respond, .. }
+                | WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | WebviewCommand::ToggleOfflinePaint { respond } => {
+                    let _ = respond.send(Ok(()));
+                }
+                WebviewCommand::CapturePainting {
+                    regions,
+                    output_paths,
+                    respond,
+                } => {
+                    assert_eq!(regions.len(), output_paths.len());
+                    *worker.lock().unwrap() = regions.iter().map(|region| region.y).collect();
+                    for path in &output_paths {
+                        std::fs::write(path, b"\x89PNG-stub").unwrap();
+                    }
+                    let _ = respond.send(Ok(output_paths));
+                }
+                _ => {}
+            }
+        }
+    });
+    attach_agent(running.port, "test-token", "codex").await;
+
+    let payload = serde_json::json!({
+        "kind": "painting",
+        "text": "three regions",
+        "pageUrl": "http://127.0.0.1/",
+        "viewport": {
+            "width": 1200, "height": 800, "scrollX": 0, "scrollY": 0,
+            "documentWidth": 1200, "documentHeight": 6000,
+            "captureRegions": [
+                {"x": 0, "y": 0, "width": 1200, "height": 800},
+                {"x": 0, "y": 2000, "width": 1200, "height": 800},
+                {"x": 0, "y": 4000, "width": 1200, "height": 800},
+            ],
+        },
+        "elements": [],
+        "marks": [{"type": "rect", "x": 10, "y": 10, "width": 100, "height": 60}],
+        "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+    })
+    .to_string();
+
+    let (status, body) =
+        raw_post_json(running.port, "/__collab__/overlay/feedback", &payload).await;
+    assert_eq!(status, 200, "body: {body}");
+    let json_body = body.split("\r\n\r\n").nth(1).unwrap();
+    let response: serde_json::Value = serde_json::from_str(json_body.trim()).unwrap();
+    let id = response["id"].as_str().unwrap();
+
+    assert_eq!(*observed.lock().unwrap(), vec![0.0, 2000.0, 4000.0]);
+    let record = collab::feedback::read_record(&root, id).unwrap();
+    assert_eq!(record.attachments.len(), 4);
+    for (index, attachment) in record.attachments.iter().take(3).enumerate() {
+        assert!(
+            attachment.ends_with(&format!("{id}-{index}.png")),
+            "attachment {index} must be the indexed PNG: {attachment}"
+        );
+        assert!(std::path::Path::new(attachment).exists());
+    }
+    assert!(record.attachments[3].ends_with(".svg"));
+    assert_eq!(record.viewport["captureRegions"][2]["y"], 4000.0);
+}
+
+/// spec「Server rejects an invalid capture plan」：malformed plan 以 HTTP 400
+/// `invalid-request` 拒絕，且不得建立任何 JSON、PNG 或 SVG。
+#[tokio::test]
+async fn painting_with_an_invalid_capture_plan_creates_no_artifact() {
+    use collab::webview::WebviewCommand;
+
+    let root = temp_root("painting-invalid-plan");
+    let (running, mut commands) = start_server_manual(root.clone(), "test-token".into()).await;
+    tokio::spawn(async move {
+        while let Some(command) = commands.recv().await {
+            match command {
+                WebviewCommand::SetCollaborationActive { respond, .. }
+                | WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | WebviewCommand::ToggleOfflinePaint { respond } => {
+                    let _ = respond.send(Ok(()));
+                }
+                WebviewCommand::CapturePainting { .. } => {
+                    panic!("an invalid capture plan must never reach the WebView");
+                }
+                _ => {}
+            }
+        }
+    });
+    attach_agent(running.port, "test-token", "codex").await;
+
+    let nine = (0..9)
+        .map(|index| serde_json::json!({"x": 0, "y": index * 400, "width": 1200, "height": 800}))
+        .collect::<Vec<_>>();
+    for regions in [
+        serde_json::json!([]),
+        serde_json::Value::from(nine),
+        serde_json::json!([{"x": 0, "y": 0, "width": 1200, "height": 0}]),
+        serde_json::json!([{"x": 0, "y": 5800, "width": 1200, "height": 800}]),
+    ] {
+        let payload = serde_json::json!({
+            "kind": "painting",
+            "text": "invalid plan",
+            "pageUrl": "http://127.0.0.1/",
+            "viewport": {
+                "width": 1200, "height": 800, "scrollX": 0, "scrollY": 0,
+                "documentWidth": 1200, "documentHeight": 6000,
+                "captureRegions": regions,
+            },
+            "elements": [],
+            "marks": [{"type": "rect", "x": 10, "y": 10, "width": 100, "height": 60}],
+            "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        })
+        .to_string();
+
+        let (status, body) =
+            raw_post_json(running.port, "/__collab__/overlay/feedback", &payload).await;
+        assert_eq!(status, 400, "regions {regions} body: {body}");
+        assert!(body.contains("invalid-request"), "body: {body}");
+    }
+
+    let feedback_dir = collab::feedback::feedback_dir(&root);
+    let created = std::fs::read_dir(&feedback_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(created, 0, "a rejected capture plan created artifacts");
+}
+
+/// spec「Any native capture or restoration fails」：任一 region 失敗即回
+/// `snapshot-failed`，並清除本次已建立的全部 PNG 與 SVG。
+#[tokio::test]
+async fn painting_partial_capture_failure_removes_every_artifact() {
+    use collab::webview::{CommandError, WebviewCommand};
+
+    let root = temp_root("painting-partial-capture");
+    let (running, mut commands) = start_server_manual(root.clone(), "test-token".into()).await;
+    tokio::spawn(async move {
+        while let Some(command) = commands.recv().await {
+            match command {
+                WebviewCommand::SetCollaborationActive { respond, .. }
+                | WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | WebviewCommand::ToggleOfflinePaint { respond } => {
+                    let _ = respond.send(Ok(()));
+                }
+                WebviewCommand::CapturePainting {
+                    output_paths,
+                    respond,
+                    ..
+                } => {
+                    // 第一張成功、第二張失敗：模擬 scroll restoration 中途失敗。
+                    std::fs::write(&output_paths[0], b"\x89PNG-stub").unwrap();
+                    let _ = respond.send(Err(CommandError::SnapshotFailed(
+                        "second region could not be captured".into(),
+                    )));
+                }
+                _ => {}
+            }
+        }
+    });
+    attach_agent(running.port, "test-token", "codex").await;
+
+    let payload = serde_json::json!({
+        "kind": "painting",
+        "text": "partial capture",
+        "pageUrl": "http://127.0.0.1/",
+        "viewport": {
+            "width": 1200, "height": 800, "scrollX": 0, "scrollY": 0,
+            "documentWidth": 1200, "documentHeight": 4000,
+            "captureRegions": [
+                {"x": 0, "y": 0, "width": 1200, "height": 800},
+                {"x": 0, "y": 3000, "width": 1200, "height": 800},
+            ],
+        },
+        "elements": [],
+        "marks": [{"type": "rect", "x": 10, "y": 10, "width": 100, "height": 60}],
+        "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+    })
+    .to_string();
+
+    let (status, body) =
+        raw_post_json(running.port, "/__collab__/overlay/feedback", &payload).await;
+
+    assert_eq!(status, 500, "body: {body}");
+    assert!(body.contains("snapshot-failed"), "body: {body}");
+    let feedback_dir = collab::feedback::feedback_dir(&root);
+    let leftovers = std::fs::read_dir(&feedback_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(leftovers, 0, "partial capture left artifacts behind");
 }
 
 #[tokio::test]
@@ -1120,15 +1357,19 @@ async fn painting_rejects_symlinked_feedback_directory_without_writing_target() 
         while let Some(command) = commands.recv().await {
             match command {
                 WebviewCommand::SetCollaborationActive { respond, .. }
-                | WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
+                | WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | WebviewCommand::ToggleOfflinePaint { respond } => {
                     let _ = respond.send(Ok(()));
                 }
-                WebviewCommand::Snapshot {
-                    output_path,
+                WebviewCommand::CapturePainting {
+                    output_paths,
                     respond,
+                    ..
                 } => {
-                    std::fs::write(&output_path, b"\x89PNG-stub").unwrap();
-                    let _ = respond.send(Ok(output_path));
+                    for path in &output_paths {
+                        std::fs::write(path, b"\x89PNG-stub").unwrap();
+                    }
+                    let _ = respond.send(Ok(output_paths));
                 }
                 _ => {}
             }
@@ -1139,7 +1380,11 @@ async fn painting_rejects_symlinked_feedback_directory_without_writing_target() 
         "kind": "painting",
         "text": "must reject symlinked feedback directory",
         "pageUrl": "http://127.0.0.1/",
-        "viewport": {"width": 800, "height": 600, "scrollX": 0, "scrollY": 0},
+        "viewport": {
+            "width": 800, "height": 600, "scrollX": 0, "scrollY": 0,
+            "documentWidth": 800, "documentHeight": 1200,
+            "captureRegions": [{"x": 0, "y": 0, "width": 800, "height": 600}],
+        },
         "elements": [],
         "marks": [{"type": "line", "x": 1, "y": 2}],
         "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",

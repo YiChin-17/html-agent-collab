@@ -37,6 +37,7 @@ async fn start_preview(
             match command {
                 WebviewCommand::SetCollaborationActive { respond, .. }
                 | WebviewCommand::SyncFeedbackMarkers { respond, .. }
+                | WebviewCommand::ToggleOfflinePaint { respond }
                 | WebviewCommand::Reload { respond } => {
                     let _ = respond.send(Ok(()));
                 }
@@ -46,6 +47,11 @@ async fn start_preview(
                 WebviewCommand::Snapshot { respond, .. } => {
                     let _ = respond.send(Err(CommandError::SnapshotFailed(
                         "snapshot not configured for this test".into(),
+                    )));
+                }
+                WebviewCommand::CapturePainting { respond, .. } => {
+                    let _ = respond.send(Err(CommandError::SnapshotFailed(
+                        "painting capture is not configured for this test".into(),
                     )));
                 }
             }
@@ -546,6 +552,14 @@ async fn eval_and_screenshot_emit_envelopes_through_command_queue() {
                 }
                 WebviewCommand::SyncFeedbackMarkers { respond, .. } => {
                     let _ = respond.send(Ok(()));
+                }
+                WebviewCommand::ToggleOfflinePaint { respond } => {
+                    let _ = respond.send(Ok(()));
+                }
+                WebviewCommand::CapturePainting { respond, .. } => {
+                    let _ = respond.send(Err(CommandError::SnapshotFailed(
+                        "painting capture is not configured for this test".into(),
+                    )));
                 }
                 WebviewCommand::Eval {
                     expression,

@@ -18,6 +18,9 @@
   var STATUS_ENDPOINT = "/__collab__/status";
   var SVG_NS = "http://www.w3.org/2000/svg";
   var HISTORY_LIMIT = 50;
+  var CAPTURE_REGION_LIMIT = 8;
+  var CAPTURE_LIMIT_MESSAGE =
+    "Painting spans more than 8 capture regions; split it into smaller feedback.";
   var PREVIEW_DRAFT_HISTORY_LIMIT = 50;
   var PREVIEW_DRAFT_DOCUMENT_LIMIT = 262144;
   var PAINT_TOOLS = [
@@ -48,14 +51,18 @@
     historyUndo: [],
     historyRedo: [],
     labelPosition: null,
-    active: false,
+    active: false,       // collaboration feedback 是否可用（至少一個 active attachment）
+    offlinePaint: false, // 零連線時由原生 dashboard 開啟的非提交式畫記
     dragPointerId: null,
     dragOffsetX: 0,
     dragOffsetY: 0,
     editorDragPointerId: null,
     editorDragOffsetX: 0,
     editorDragOffsetY: 0,
-    lastMarkerRevision: -1
+    lastMarkerRevision: -1,
+    viewportSyncHandle: null,
+    markerItems: [],
+    capture: null        // multi-region capture 期間保存的原始 scroll 位置
   };
   var previewDraftManager = {
     status: "idle",
@@ -112,8 +119,48 @@
     return path;
   }
 
-  function elementPayload(el) {
+  // ---------- document-space geometry ----------
+  // spec「Visual annotations remain anchored to document content」：mark、element
+  // rect、overlap 一律以 document-space CSS pixels 記錄；只有實際貼在 viewport 的
+  // 固定 UI（toolbar、editor、marker、selection indicator）才在渲染時換算回螢幕。
+
+  function documentPoint(event) {
+    return {
+      x: event.clientX + window.scrollX,
+      y: event.clientY + window.scrollY
+    };
+  }
+
+  function documentRect(el) {
     var rect = el.getBoundingClientRect();
+    return {
+      x: rect.left + window.scrollX,
+      y: rect.top + window.scrollY,
+      width: rect.width,
+      height: rect.height
+    };
+  }
+
+  function documentSize() {
+    var doc = document.documentElement;
+    var body = document.body;
+    return {
+      width: Math.max(
+        doc ? doc.scrollWidth : 0,
+        doc ? doc.clientWidth : 0,
+        body ? body.scrollWidth : 0,
+        window.innerWidth
+      ),
+      height: Math.max(
+        doc ? doc.scrollHeight : 0,
+        doc ? doc.clientHeight : 0,
+        body ? body.scrollHeight : 0,
+        window.innerHeight
+      )
+    };
+  }
+
+  function elementPayload(el) {
     var attributes = {};
     for (var i = 0; i < el.attributes.length; i++) {
       attributes[el.attributes[i].name] = el.attributes[i].value;
@@ -123,18 +170,21 @@
       selector: cssPath(el),
       domPath: domPath(el),
       attributes: attributes,
-      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      rect: documentRect(el),
       textSnippet: (el.textContent || "").trim().slice(0, 120)
     };
   }
 
   function viewportPayload() {
+    var size = documentSize();
     return {
       width: window.innerWidth,
       height: window.innerHeight,
       scrollX: window.scrollX,
       scrollY: window.scrollY,
-      devicePixelRatio: window.devicePixelRatio
+      devicePixelRatio: window.devicePixelRatio,
+      documentWidth: size.width,
+      documentHeight: size.height
     };
   }
 
@@ -540,15 +590,12 @@
       var el = all[i];
       var tag = el.tagName.toLowerCase();
       if (tag === HOST_TAG || tag === "script" || tag === "style") continue;
-      var rect = el.getBoundingClientRect();
-      var area = rect.width * rect.height;
+      var box = documentRect(el);
+      var area = box.width * box.height;
       if (area <= 0) continue;
       var best = 0;
       for (var j = 0; j < boxes.length; j++) {
-        var ratio = intersectionArea(
-          { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-          boxes[j]
-        ) / area;
+        var ratio = intersectionArea(box, boxes[j]) / area;
         if (ratio > best) best = ratio;
       }
       if (best >= 0.02) {
@@ -559,6 +606,94 @@
     }
     results.sort(function (a, b) { return b.overlapRatio - a.overlapRatio; });
     return results.slice(0, 10);
+  }
+
+  // ---------- capture planner ----------
+  // design「Capture planner 依 mark bounds 分組而非 scroll history」：完全由
+  // document-space bounds 決定，使用者中途捲動幾次都不影響分組結果。
+
+  function unionBox(a, b) {
+    var x = Math.min(a.x, b.x);
+    var y = Math.min(a.y, b.y);
+    return {
+      x: x,
+      y: y,
+      width: Math.max(a.x + a.width, b.x + b.width) - x,
+      height: Math.max(a.y + a.height, b.y + b.height) - y
+    };
+  }
+
+  // region 必須包含整個 group 並留下 context，且完全落在 document bounds 內。
+  function regionForBounds(box, width, height, docSize) {
+    var w = Math.min(width, docSize.width);
+    var h = Math.min(height, docSize.height);
+    var maxX = Math.max(0, docSize.width - w);
+    var maxY = Math.max(0, docSize.height - h);
+    var left = box.x + box.width / 2 - w / 2;
+    var top = box.y + box.height / 2 - h / 2;
+    return {
+      x: Math.round(Math.min(Math.max(0, left), maxX)),
+      y: Math.round(Math.min(Math.max(0, top), maxY)),
+      width: Math.round(w),
+      height: Math.round(h)
+    };
+  }
+
+  // 單一 mark 超過一個 viewport 時，以不重疊的 viewport-sized tiles 覆蓋其 bounds。
+  function tileBounds(box, width, height, docSize) {
+    var tiles = [];
+    var right = box.x + Math.max(box.width, 1);
+    var bottom = box.y + Math.max(box.height, 1);
+    for (var y = box.y; y < bottom; y += height) {
+      for (var x = box.x; x < right; x += width) {
+        tiles.push(
+          regionForBounds({ x: x, y: y, width: 0, height: 0 }, width, height, docSize)
+        );
+      }
+    }
+    return tiles;
+  }
+
+  function planCaptureRegions(bounds, viewport, docSize) {
+    var width = Math.max(1, viewport.width);
+    var height = Math.max(1, viewport.height);
+    var entries = bounds
+      .map(function (box, index) { return { box: box, index: index }; })
+      .filter(function (entry) {
+        return entry.box && isFinite(entry.box.x) && isFinite(entry.box.y) &&
+          isFinite(entry.box.width) && isFinite(entry.box.height);
+      });
+    entries.sort(function (a, b) {
+      return a.box.y - b.box.y || a.box.x - b.box.x || a.index - b.index;
+    });
+    var regions = [];
+    var group = null;
+    entries.forEach(function (entry) {
+      var box = entry.box;
+      if (box.width > width || box.height > height) {
+        if (group) {
+          regions.push(regionForBounds(group, width, height, docSize));
+          group = null;
+        }
+        tileBounds(box, width, height, docSize).forEach(function (tile) {
+          regions.push(tile);
+        });
+        return;
+      }
+      if (!group) {
+        group = box;
+        return;
+      }
+      var merged = unionBox(group, box);
+      if (merged.width <= width && merged.height <= height) {
+        group = merged;
+        return;
+      }
+      regions.push(regionForBounds(group, width, height, docSize));
+      group = box;
+    });
+    if (group) regions.push(regionForBounds(group, width, height, docSize));
+    return regions;
   }
 
   function renderMark(mark) {
@@ -741,8 +876,16 @@
     saveDraft();
   }
 
+  // 送出的 editable SVG 以 document dimensions 當 viewBox，讓 shape 座標與
+  // JSON marks 落在同一座標系；畫面上的 layer 仍維持 fixed viewport 視窗。
   function serializeSvg() {
-    return new XMLSerializer().serializeToString(ui.paintLayer);
+    var size = documentSize();
+    var clone = ui.paintLayer.cloneNode(true);
+    clone.removeAttribute("style");
+    clone.setAttribute("viewBox", "0 0 " + size.width + " " + size.height);
+    clone.setAttribute("width", size.width);
+    clone.setAttribute("height", size.height);
+    return new XMLSerializer().serializeToString(clone);
   }
 
   // ---------- UI ----------
@@ -887,9 +1030,11 @@
     shadow.appendChild(ui.highlight);
 
     // 固定定位 SVG painting layer；marks 在 overlay 內，WebKit snapshot 一起擷取。
+    // viewBox 由 syncPaintViewport 依 scroll 更新，因此 layer 內的座標是 document-space。
     ui.paintLayer = document.createElementNS(SVG_NS, "svg");
     ui.paintLayer.setAttribute("class", "collab-paint-layer");
     ui.paintLayer.setAttribute("xmlns", SVG_NS);
+    ui.paintLayer.setAttribute("preserveAspectRatio", "none");
     ui.paintLayer.style.cssText =
       "position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:4;";
     var defs = document.createElementNS(SVG_NS, "defs");
@@ -972,6 +1117,7 @@
     shadow.appendChild(ui.markerLayer);
 
     refreshToolbar();
+    syncPaintViewport();
   }
 
   function toast(message) {
@@ -1007,6 +1153,23 @@
     );
   }
 
+  // scroll/resize 只更新 fixed SVG layer 的 viewBox，不改寫任何已保存的 mark
+  // geometry；高頻事件用單一 requestAnimationFrame coalesce。
+  function syncPaintViewport() {
+    state.viewportSyncHandle = null;
+    if (!ui.paintLayer) return;
+    var viewBoxValue =
+      window.scrollX + " " + window.scrollY + " " + window.innerWidth + " " + window.innerHeight;
+    ui.paintLayer.setAttribute("viewBox", viewBoxValue);
+    refreshSelectionIndicator();
+    layoutMarkers();
+  }
+
+  function scheduleViewportSync() {
+    if (state.viewportSyncHandle !== null) return;
+    state.viewportSyncHandle = window.requestAnimationFrame(syncPaintViewport);
+  }
+
   function refreshSelectionIndicator() {
     if (state.selectedMark === null || !state.marks[state.selectedMark]) {
       ui.selectionIndicator.style.display = "none";
@@ -1014,8 +1177,8 @@
     }
     var box = markBBox(state.marks[state.selectedMark]);
     ui.selectionIndicator.style.display = "block";
-    ui.selectionIndicator.style.left = box.x - 4 + "px";
-    ui.selectionIndicator.style.top = box.y - 4 + "px";
+    ui.selectionIndicator.style.left = box.x - 4 - window.scrollX + "px";
+    ui.selectionIndicator.style.top = box.y - 4 - window.scrollY + "px";
     ui.selectionIndicator.style.width = Math.max(8, box.width + 8) + "px";
     ui.selectionIndicator.style.height = Math.max(8, box.height + 8) + "px";
   }
@@ -1026,8 +1189,11 @@
     ui.labelInput.style.display = "block";
     var width = ui.labelInput.offsetWidth || 180;
     var height = ui.labelInput.offsetHeight || 28;
-    ui.labelInput.style.left = Math.min(Math.max(0, x), Math.max(0, window.innerWidth - width)) + "px";
-    ui.labelInput.style.top = Math.min(Math.max(0, y), Math.max(0, window.innerHeight - height)) + "px";
+    // x/y 是 document-space；label input 是 fixed，因此顯示時換算回 viewport。
+    var viewX = x - window.scrollX;
+    var viewY = y - window.scrollY;
+    ui.labelInput.style.left = Math.min(Math.max(0, viewX), Math.max(0, window.innerWidth - width)) + "px";
+    ui.labelInput.style.top = Math.min(Math.max(0, viewY), Math.max(0, window.innerHeight - height)) + "px";
     ui.labelInput.focus();
   }
 
@@ -1046,8 +1212,18 @@
     ui.labelInput.style.display = "none";
   }
 
+  // 兩種畫記用途共用同一套 drawing primitives，但可用性各自獨立：
+  // collaboration 需要 active attachment；離線 Paint 需要零連線且使用者開啟。
+  function paintingAvailable() {
+    return state.active || state.offlinePaint;
+  }
+
   function refreshToolbar() {
-    ui.toolbar.style.display = state.active ? "flex" : "none";
+    ui.toolbar.style.display = paintingAvailable() ? "flex" : "none";
+    // Element、Note、Send paint 是 collaboration 專屬入口；離線 Paint 不得暴露。
+    ui.commentButton.style.display = state.active ? "" : "none";
+    ui.noteButton.style.display = state.active ? "" : "none";
+    ui.paintButton.style.display = state.active ? "" : "none";
     ui.commentButton.classList.toggle("active", state.mode === "comment");
     ui.paintButton.classList.toggle("active", state.mode === "paint");
     Object.keys(ui.toolButtons).forEach(function (tool) {
@@ -1062,17 +1238,71 @@
         action === "redo" ? !state.historyRedo.length : !state.marks.length;
     });
     ui.sendPaintButton.style.display =
-      state.mode === "paint" || state.marks.length ? "" : "none";
+      state.active && (state.mode === "paint" || state.marks.length) ? "" : "none";
     ui.paintLayer.style.pointerEvents = state.mode === "paint" ? "auto" : "none";
     ui.paintLayer.style.cursor = state.mode === "paint" ? "crosshair" : "";
-    ui.paintLayer.style.display = state.active ? "" : "none";
-    if (state.active) clampCurrentToolbarPosition();
+    ui.paintLayer.style.display = paintingAvailable() ? "" : "none";
+    if (paintingAvailable()) clampCurrentToolbarPosition();
+  }
+
+  // design「Multi-region snapshot 在單一 WebviewCommand 內恢復 UI 與 scroll」：
+  // capture 期間隱藏會隨畫面移動的 collaboration 控制項；endCapture 一定恢復
+  // 原始 scroll 與 UI，成功與失敗路徑共用同一個恢復點。
+  function beginCapture() {
+    if (!state.capture) {
+      state.capture = { scrollX: window.scrollX, scrollY: window.scrollY };
+    }
+    ui.toolbar.style.display = "none";
+    ui.editor.style.visibility = "hidden";
+    ui.selectionIndicator.style.display = "none";
+    cancelLabelInput();
+    return true;
+  }
+
+  function moveToCaptureRegion(x, y) {
+    window.scrollTo(x, y);
+    syncPaintViewport();
+    return true;
+  }
+
+  function endCapture() {
+    var capture = state.capture;
+    state.capture = null;
+    if (capture) window.scrollTo(capture.scrollX, capture.scrollY);
+    ui.editor.style.visibility = "";
+    refreshToolbar();
+    syncPaintViewport();
+    return true;
+  }
+
+  function closeOfflinePaint() {
+    if (!state.offlinePaint) return;
+    state.offlinePaint = false;
+    state.mode = null;
+    clearMarks();
+    refreshToolbar();
+  }
+
+  // 由 bounded WebviewCommand 呼叫；server 已在 attachment lifecycle 邊界確認零連線。
+  function toggleOfflinePaint() {
+    if (state.active) return false;
+    if (state.offlinePaint) {
+      closeOfflinePaint();
+      return false;
+    }
+    state.offlinePaint = true;
+    state.mode = "paint";
+    refreshToolbar();
+    return true;
   }
 
   function setActive(active) {
     state.active = !!active;
     if (!ui.toolbar) return;
-    if (!state.active) {
+    if (state.active) {
+      // 互斥：collaboration 變 active 前先清除離線 marks 與 palette。
+      closeOfflinePaint();
+    } else if (!state.offlinePaint) {
       closeEditor();
       clearMarks();
       state.mode = null;
@@ -1189,6 +1419,7 @@
 
   // spec「Submit empty text without visual markup」：保持編輯器開啟、不建立 feedback。
   function attemptSubmit() {
+    if (!state.active) return Promise.resolve(null);
     var kind = state.editorKind;
     var text = ui.textarea.value.trim();
     if (kind === "element-comment") {
@@ -1232,9 +1463,26 @@
   }
 
   // spec「Submit painting feedback」：PNG + editable vector payload + overlap 排序。
+  // spec「Offline Paint cannot submit」：離線 marks 沒有接收 agent，不得 POST。
   function submitPainting(text) {
+    if (!state.active) return Promise.resolve(null);
     clearPaintSelection();
+    var regions = planCaptureRegions(
+      state.marks.map(markBBox),
+      { width: window.innerWidth, height: window.innerHeight },
+      documentSize()
+    );
+    if (!regions.length) {
+      // 沿用既有 empty-paint 驗證：保持編輯器開啟，不建立 feedback。
+      ui.hint.style.display = "block";
+      return Promise.resolve(null);
+    }
+    if (regions.length > CAPTURE_REGION_LIMIT) {
+      toast(CAPTURE_LIMIT_MESSAGE);
+      return Promise.resolve(null);
+    }
     var body = feedbackBody("painting", text || "", computeOverlaps(state.marks));
+    body.viewport.captureRegions = regions;
     body.marks = state.marks;
     body.svg = serializeSvg();
     return submitFeedback(body).then(
@@ -1255,6 +1503,9 @@
   // ---------- draft persistence（reload 後恢復未送出內容） ----------
 
   function saveDraft() {
+    // spec「Reload while detached」：離線 marks 不寫入 sessionStorage，
+    // 新的 JS context 自然回到「Offline Paint 關閉且無 marks」。
+    if (!state.active) return;
     try {
       sessionStorage.setItem(
         DRAFT_KEY,
@@ -1344,16 +1595,27 @@
     }
   }
 
+  // marker 是 fixed UI，但綁定的是 element identity：每次 layout 重新解析 target
+  // 並讀取當下 bounding rect，因此 scroll/resize 後仍指向原本的元素。
+  // 解析不到 target 就不放 marker，沿用既有 orphan reconciliation，不錯綁其他元素。
+  function layoutMarkers() {
+    if (!ui.markerLayer) return;
+    clearMarkers();
+    state.markerItems.forEach(function (item) {
+      var el = resolveTarget(item.element);
+      if (!el) return;
+      addMarkerFor(el, item);
+    });
+  }
+
   function applyMarkerSnapshot(snapshot) {
     if (!snapshot || typeof snapshot.revision !== "number") return false;
     if (snapshot.revision < state.lastMarkerRevision) return false;
     state.lastMarkerRevision = snapshot.revision;
-    clearMarkers();
-    (snapshot.items || []).forEach(function (item) {
-      if (item.state === "resolved") return;
-      var el = resolveTarget(item.element);
-      if (el) addMarkerFor(el, item);
+    state.markerItems = (snapshot.items || []).filter(function (item) {
+      return item.state !== "resolved";
     });
+    layoutMarkers();
     return true;
   }
 
@@ -1501,17 +1763,16 @@
   }
 
   function onPaintDown(event) {
-    if (!state.active || state.mode !== "paint" || editorOpen() || state.labelPosition) return;
-    var x = event.clientX;
-    var y = event.clientY;
+    if (!paintingAvailable() || state.mode !== "paint" || editorOpen() || state.labelPosition) return;
+    var point = documentPoint(event);
     if (state.tool === "select") {
-      var selectedIndex = hitMarkIndex(x, y);
+      var selectedIndex = hitMarkIndex(point.x, point.y);
       state.selectedMark = selectedIndex === -1 ? null : selectedIndex;
       if (selectedIndex !== -1) {
         state.paintGesture = {
           index: selectedIndex,
-          startX: x,
-          startY: y,
+          startX: point.x,
+          startY: point.y,
           before: cloneMarks(state.marks),
           original: cloneMarks([state.marks[selectedIndex]])[0]
         };
@@ -1520,7 +1781,7 @@
       return;
     }
     if (state.tool === "eraser") {
-      var erasedIndex = hitMarkIndex(x, y);
+      var erasedIndex = hitMarkIndex(point.x, point.y);
       if (erasedIndex === -1) return;
       commitMarksMutation();
       state.marks.splice(erasedIndex, 1);
@@ -1531,42 +1792,49 @@
       return;
     }
     if (state.tool === "freehand") {
-      state.draft = { type: "freehand", points: [[x, y]] };
+      state.draft = { type: "freehand", points: [[point.x, point.y]] };
     } else if (state.tool === "rect") {
-      state.draft = { type: "rect", x: x, y: y, width: 0, height: 0, startX: x, startY: y };
+      state.draft = {
+        type: "rect",
+        x: point.x,
+        y: point.y,
+        width: 0,
+        height: 0,
+        startX: point.x,
+        startY: point.y
+      };
     } else if (state.tool === "arrow") {
-      state.draft = { type: "arrow", x1: x, y1: y, x2: x, y2: y };
+      state.draft = { type: "arrow", x1: point.x, y1: point.y, x2: point.x, y2: point.y };
     } else if (state.tool === "label") {
-      openLabelInput(x, y);
+      openLabelInput(point.x, point.y);
       return;
     }
     renderMarks();
   }
 
   function onPaintMove(event) {
+    var point = documentPoint(event);
     if (state.paintGesture) {
       var gesture = state.paintGesture;
       state.marks[gesture.index] = translateMark(
         gesture.original,
-        event.clientX - gesture.startX,
-        event.clientY - gesture.startY
+        point.x - gesture.startX,
+        point.y - gesture.startY
       );
       renderMarks();
       return;
     }
     if (!state.draft) return;
-    var x = event.clientX;
-    var y = event.clientY;
     if (state.draft.type === "freehand") {
-      state.draft.points.push([x, y]);
+      state.draft.points.push([point.x, point.y]);
     } else if (state.draft.type === "rect") {
-      state.draft.x = Math.min(state.draft.startX, x);
-      state.draft.y = Math.min(state.draft.startY, y);
-      state.draft.width = Math.abs(x - state.draft.startX);
-      state.draft.height = Math.abs(y - state.draft.startY);
+      state.draft.x = Math.min(state.draft.startX, point.x);
+      state.draft.y = Math.min(state.draft.startY, point.y);
+      state.draft.width = Math.abs(point.x - state.draft.startX);
+      state.draft.height = Math.abs(point.y - state.draft.startY);
     } else if (state.draft.type === "arrow") {
-      state.draft.x2 = x;
-      state.draft.y2 = y;
+      state.draft.x2 = point.x;
+      state.draft.y2 = point.y;
     }
     renderMarks();
   }
@@ -1574,8 +1842,9 @@
   function onPaintUp(event) {
     if (state.paintGesture) {
       var gesture = state.paintGesture;
+      var point = documentPoint(event);
       state.paintGesture = null;
-      if (event.clientX !== gesture.startX || event.clientY !== gesture.startY) {
+      if (point.x !== gesture.startX || point.y !== gesture.startY) {
         commitMarksMutation(gesture.before);
         saveDraft();
         refreshToolbar();
@@ -1612,6 +1881,8 @@
     window.addEventListener("click", onClick, true);
     window.addEventListener("resize", clampCurrentToolbarPosition);
     window.addEventListener("resize", clampCurrentEditorPosition);
+    window.addEventListener("scroll", scheduleViewportSync, { passive: true });
+    window.addEventListener("resize", scheduleViewportSync);
     window.addEventListener("keydown", onKeyDown, true);
     ui.dragHandle.addEventListener("pointerdown", onToolbarPointerDown);
     ui.dragHandle.addEventListener("pointermove", onToolbarPointerMove);
@@ -1651,6 +1922,10 @@
     hostCount: function () {
       return document.querySelectorAll(HOST_TAG).length;
     },
+    toggleOfflinePaint: toggleOfflinePaint,
+    offlinePaintOpen: function () {
+      return state.offlinePaint;
+    },
     setMode: setMode,
     setTool: function (tool) {
       state.tool = tool;
@@ -1683,6 +1958,10 @@
     computeOverlaps: function () {
       return computeOverlaps(state.marks);
     },
+    planCaptureRegions: planCaptureRegions,
+    beginCapture: beginCapture,
+    moveToCaptureRegion: moveToCaptureRegion,
+    endCapture: endCapture,
     submitPainting: submitPainting,
     reconcileNow: reconcile,
     syncFeedbackMarkers: applyMarkerSnapshot,
