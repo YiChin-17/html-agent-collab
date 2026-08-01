@@ -13,7 +13,7 @@ html-agent-collab 是本機 macOS preview 工具，不是可部署到網路的 H
 
 ## 通報安全漏洞
 
-Repository 公開後，請使用 GitHub repository 的 Security 頁面與 GitHub private vulnerability reporting 私下通報安全漏洞。此功能會依 `docs/RELEASING.md` 的首次公開清單，在 visibility 切換為 public 後立即啟用並讀回驗證。不要建立公開 issue、pull request 或 discussion，也不要在報告中附上真實 control token、`.collab/session.json` 或私人 project 內容。
+Repository 公開後，請使用 GitHub repository 的 Security 頁面與 GitHub private vulnerability reporting 私下通報安全漏洞。不要建立公開 issue、pull request 或 discussion，也不要在報告中附上真實 control token、`.collab/session.json` 或私人 project 內容。
 
 報告請包含受影響的 commit 或版本、macOS 版本、最小重現步驟、影響範圍及已知緩解方式。Maintainer 會在 private advisory 內協調確認、修正與公開時程。
 

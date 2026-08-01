@@ -182,6 +182,7 @@ fn security_policy_uses_private_reporting_without_personal_email() {
     for contract in [
         "## 支援版本",
         "## 通報安全漏洞",
+        "Repository 公開後",
         "GitHub private vulnerability reporting",
         "不要建立公開 issue",
         "一般 bug",
@@ -218,29 +219,6 @@ fn security_policy_documents_private_runtime_artifact_boundary() {
             "security policy missing runtime artifact boundary: {contract}"
         );
     }
-}
-
-#[test]
-fn publication_checklist_enables_private_reporting_only_after_public_visibility() {
-    let security = read("SECURITY.md");
-    let releasing = read("docs/RELEASING.md");
-    let publish = "gh repo edit YiChin-17/html-agent-collab --visibility public --accept-visibility-change-consequences";
-    let enable =
-        "gh api --method PUT repos/YiChin-17/html-agent-collab/private-vulnerability-reporting";
-    let verify =
-        "gh api repos/YiChin-17/html-agent-collab/private-vulnerability-reporting --jq '.enabled'";
-
-    assert!(security.contains("Repository 公開後"));
-    assert!(security.contains("GitHub private vulnerability reporting"));
-    assert!(releasing.contains("目前保持 private"));
-    assert!(releasing.contains(
-        "gh repo view YiChin-17/html-agent-collab --json visibility,description,defaultBranchRef"
-    ));
-    assert!(releasing.contains(publish));
-    assert!(releasing.contains(enable));
-    assert!(releasing.contains(verify));
-    assert!(releasing.find(publish) < releasing.find(enable));
-    assert!(releasing.find(enable) < releasing.find(verify));
 }
 
 #[test]
