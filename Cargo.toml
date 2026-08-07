@@ -14,9 +14,11 @@ categories = ["development-tools"]
 exclude = [
     ".agents/**",
     ".claude/**",
+    ".claude-plugin/**",
     ".github/**",
     ".spectra*",
     "openspec/**",
+    "plugin/**",
     "AGENTS.md",
     "CLAUDE.md",
     "docs/PLAN.md",

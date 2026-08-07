@@ -8,10 +8,28 @@ Built with Rust, Tauri 2, and one WKWebView. Requires macOS 15+. No Chromium, no
 
 ## Quick start
 
+Install the `collab` binary:
+
 ```bash
 cargo build --release
 cargo install --path . --locked
 ```
+
+Install the workflow skills as a plugin. Claude Code:
+
+```text
+/plugin marketplace add YiChin-17/html-agent-collab
+/plugin install collab@html-agent-collab
+```
+
+Codex:
+
+```bash
+codex plugin marketplace add YiChin-17/html-agent-collab
+codex plugin add collab@html-agent-collab
+```
+
+Claude Code namespaces plugin skills, so `$preview-collaboration-start` below is invoked as `/collab:preview-collaboration-start` after a plugin install. Contributors who clone this repository get the same skills without installing the plugin.
 
 Open a preview and start continuous collaboration:
 

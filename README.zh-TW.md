@@ -8,10 +8,28 @@
 
 ## 快速開始
 
+安裝 `collab` binary：
+
 ```bash
 cargo build --release
 cargo install --path . --locked
 ```
+
+以 plugin 安裝 workflow skills。Claude Code：
+
+```text
+/plugin marketplace add YiChin-17/html-agent-collab
+/plugin install collab@html-agent-collab
+```
+
+Codex：
+
+```bash
+codex plugin marketplace add YiChin-17/html-agent-collab
+codex plugin add collab@html-agent-collab
+```
+
+Claude Code 會為 plugin skills 加上 namespace，因此下方的 `$preview-collaboration-start` 在安裝 plugin 後以 `/collab:preview-collaboration-start` 呼叫。Clone 本 repository 的貢獻者不必安裝 plugin 即可取得相同 skills。
 
 開啟 preview 並啟動持續協作：
 

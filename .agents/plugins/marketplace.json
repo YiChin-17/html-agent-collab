@@ -1,0 +1,19 @@
+{
+  "name": "html-agent-collab",
+  "interface": {
+    "displayName": "html-agent-collab"
+  },
+  "plugins": [
+    {
+      "name": "collab",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Engineering"
+    }
+  ]
+}

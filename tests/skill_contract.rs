@@ -25,8 +25,9 @@ fn skill_directories(agent_root: &str) -> Vec<String> {
         .filter_map(|entry| {
             let entry = entry.unwrap_or_else(|error| panic!("cannot read skill entry: {error}"));
             let name = entry.file_name().to_string_lossy().into_owned();
-            entry
-                .file_type()
+            // Shipped skills live in plugin/skills/ and are surfaced here as symlinks, so the
+            // type check has to follow them: read_dir reports the link itself, not its target.
+            std::fs::metadata(entry.path())
                 .unwrap_or_else(|error| panic!("cannot inspect skill entry: {error}"))
                 .is_dir()
                 .then_some(name)
