@@ -7,6 +7,11 @@ Stop collaboration without closing the preview.
 
 Use only `collab detach`. Never use `collab close` in this workflow.
 
+**Prerequisites**: this skill requires the `collab` CLI. When a `collab`
+command fails with `command not found`, report that the CLI is not installed,
+point at `cargo install --path . --locked` from an html-agent-collab checkout,
+and stop.
+
 Pause and Stop are distinct. Pause preserves the attachment so the same wait
 can resume; Stop makes it inactive. `collab detach` accepts an attachment that
 is active, pause-requested, or paused and wakes its wait with

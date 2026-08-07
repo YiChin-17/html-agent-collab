@@ -9,6 +9,14 @@ continuous feedback workflow. This skill accepts exactly one Preview ID.
 Use only the shared `collab` CLI. The preview must already exist, and the agent
 conversation must already be open in the same project workspace.
 
+**Prerequisites**: this skill requires the `collab` CLI. When a `collab`
+command fails with `command not found`, report that the CLI is not installed,
+point at `cargo install --path . --locked` from an html-agent-collab checkout,
+and stop without substituting another preview mechanism.
+
+Read `collab <command> --help` when an argument is unclear. Do not run a
+`collab` command that this skill does not name.
+
 Use the fixed lifecycle terms consistently: Open preview creates the runtime,
 Connect agent creates a new attachment, Resume continues a paused attachment,
 Stop collaboration deactivates an attachment while preserving the preview, and

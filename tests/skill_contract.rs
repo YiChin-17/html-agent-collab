@@ -403,3 +403,41 @@ fn close_shuts_down_the_preview_runtime() {
     assert!(skill.contains("session file"));
     assert!(!skill.contains("collab detach"));
 }
+
+#[test]
+fn every_skill_stops_when_the_cli_is_missing() {
+    for skill in SKILLS {
+        let content = normalized(&path(".agents", skill));
+
+        for contract in [
+            "requires the `collab` CLI",
+            "command not found",
+            "cargo install --path . --locked",
+        ] {
+            assert!(
+                content.contains(contract),
+                "{skill} is missing the CLI prerequisite: {contract}"
+            );
+        }
+    }
+}
+
+#[test]
+fn entry_skills_point_at_cli_help_without_widening_the_command_set() {
+    for skill in [
+        "preview-collaboration-start",
+        "preview-collaboration-connect",
+    ] {
+        let content = normalized(&path(".agents", skill));
+
+        for contract in [
+            "collab <command> --help",
+            "Do not run a `collab` command that this skill does not name",
+        ] {
+            assert!(
+                content.contains(contract),
+                "{skill} is missing the CLI help contract: {contract}"
+            );
+        }
+    }
+}

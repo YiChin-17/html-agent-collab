@@ -5,6 +5,11 @@ description: Close an HTML preview runtime and stop all collaboration attachment
 
 Close the preview runtime when the user is finished with the preview itself.
 
+**Prerequisites**: this skill requires the `collab` CLI. When a `collab`
+command fails with `command not found`, report that the CLI is not installed,
+point at `cargo install --path . --locked` from an html-agent-collab checkout,
+and stop.
+
 ## Session discovery — `--project`
 
 `--project <dir>` locates the preview session by walking **up** ancestor

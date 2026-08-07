@@ -9,6 +9,14 @@ Open preview for a single HTML entry. The skill accepts an optional
 Use only the shared `collab` CLI. Do not call the loopback HTTP service
 directly and do not require MCP configuration.
 
+**Prerequisites**: this skill requires the `collab` CLI. When a `collab`
+command fails with `command not found`, report that the CLI is not installed,
+point at `cargo install --path . --locked` from an html-agent-collab checkout,
+and stop without substituting another preview mechanism.
+
+Read `collab <command> --help` when an argument is unclear. Do not run a
+`collab` command that this skill does not name.
+
 ## Session discovery — `--project`
 
 Every `collab` subcommand except `open` accepts `--project <dir>` to locate
