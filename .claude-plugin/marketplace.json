@@ -10,7 +10,6 @@
       "name": "collab",
       "source": "./plugin",
       "description": "Preview collaboration skills for the collab CLI. Requires the collab binary: cargo install --path . --locked",
-      "version": "0.4.0",
       "license": "MIT OR Apache-2.0",
       "homepage": "https://github.com/YiChin-17/html-agent-collab"
     }
